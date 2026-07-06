@@ -12,6 +12,7 @@ def route_from_supervisor(state: GlobalState) -> str:
     next_action = state.get("next_action", "end")
     
     # If next_action is "end", return "end" to trigger END node
+    #  the routing map is added to provide safety check and  afallback that in any case if llm provides an unexpected next_action, it will route to "end" node.
     if next_action == "end":
         return "end"
     

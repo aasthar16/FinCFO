@@ -67,7 +67,7 @@ class CashRunwayForecast:
     p10_days: int
     p50_days: int
     p90_days: int
-    model_accuracy: float
+    # model_accuracy: float
     assumptions: Dict[str, Any]
 
 
@@ -229,7 +229,7 @@ def forecast_cash_runway(
             p10_days=3650,
             p50_days=3650,
             p90_days=3650,
-            model_accuracy=1.0,
+            # model_accuracy=1.0,
             assumptions={"note": "Not burning cash"},
         )
     
@@ -259,7 +259,7 @@ def forecast_cash_runway(
     p50_date = today + timedelta(days=30 * p50_months)
     p90_date = today + timedelta(days=30 * p90_months)
     
-    model_accuracy = float(max(0.5, min(0.95, 1 - (burn_volatility * 2))))
+    # model_accuracy = float(max(0.5, min(0.95, 1 - (burn_volatility * 2))))
     
     return CashRunwayForecast(
         p10_date=p10_date,
@@ -268,7 +268,7 @@ def forecast_cash_runway(
         p10_days=p10_months * 30,
         p50_days=p50_months * 30,
         p90_days=p90_months * 30,
-        model_accuracy=model_accuracy,
+        # model_accuracy=model_accuracy,
         assumptions=convert_to_serializable({
             "burn_volatility": burn_volatility,
             "monte_carlo_runs": monte_carlo_runs,

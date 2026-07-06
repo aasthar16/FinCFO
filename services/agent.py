@@ -1,120 +1,183 @@
 """
-Agentic Supervisor - LLM-powered orchestration.
-Decides which tools to call and in what order.
+Agentic Supervisor - LLM-powered orchestration with structured output.
+Uses LangChain + Pydantic to enforce schema on LLM responses.
 """
 
 import json
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from pydantic import BaseModel, Field
+from typing_extensions import Literal
 
-from services.llm_service import call_llm, call_llm_with_history, extract_json_from_llm
-from services.tools import TOOLS_SCHEMA, execute_tool, TOOL_MAP
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
 
+from services.tools import TOOL_MAP, execute_tool
+from settings import settings
 logger = logging.getLogger(__name__)
 
 
 # ================================================================
-# AGENT SYSTEM PROMPTS
+# PYDANTIC SCHEMAS — Enforce LLM output structure
 # ================================================================
 
-ROUTING_SYSTEM_PROMPT = """You are FinCFO router. Decide which tools to call.
+class PlanResult(BaseModel):
+    """Schema for the planning agent's output."""
+    plan: List[Literal[
+        "calculate_burn_metrics",
+        "forecast_runway",
+        "model_scenario",
+        "generate_recommendations"
+    ]] = Field(
+        default_factory=list,
+        description="Ordered list of tool names to execute. Empty list if no tools needed."
+    )
+    reasoning: str = Field(
+        default="",
+        description="Brief explanation of why these specific tools were chosen in this order"
+    )
+    response_hint: str = Field(
+        default="",
+        description="What aspect to focus on when generating the final response (e.g., 'Show runway impact', 'Highlight burn reduction')"
+    )
+
+
+class ScenarioResult(BaseModel):
+    """Schema for scenario extraction output."""
+    action: Literal["hire", "fire", "replace", "revenue_change", "expense_change", "none"] = Field(
+        default="none",
+        description="Type of scenario action detected"
+    )
+    count: int = Field(
+        default=0,
+        description="Number of people to hire or fire"
+    )
+    role: str = Field(
+        default="employee",
+        description="Job role mentioned (e.g., engineer, designer, manager)"
+    )
+    salary: Optional[float] = Field(
+        default=None,
+        description="Monthly salary per person, if mentioned"
+    )
+    headcount_change: int = Field(
+        default=0,
+        description="Net change in headcount (positive for hire, negative for fire)"
+    )
+    revenue_change: Optional[float] = Field(
+        default=None,
+        description="Change in monthly revenue, if mentioned"
+    )
+    one_time_expenses: Optional[float] = Field(
+        default=None,
+        description="One-time expense amount, if mentioned"
+    )
+    is_addition: bool = Field(
+        default=False,
+        description="True if this is adding to a previous scenario"
+    )
+    explanation: str = Field(
+        default="",
+        description="Human-readable explanation of what was parsed from the query"
+    )
+
+
+
+
+class ResponseResult(BaseModel):
+    """Schema for final response generation."""
+    section_title: str = Field(
+        default="### 📊 Financial Summary",
+        description="Section header with emoji (e.g., '### 🔥 Burn Rate Analysis')"
+    )
+    bullet_points: List[str] = Field(
+        default_factory=list,
+        description="Key metrics as bullet points (e.g., '- **Net Burn:** $105,000/month')"
+    )
+    insight: str = Field(
+        default="",
+        description="One-line actionable insight or warning"
+    )
+    severity: Literal["critical", "warning", "healthy", "neutral"] = Field(
+        default="neutral",
+        description="Overall severity assessment"
+    )
+
+
+# ================================================================
+# SYSTEM PROMPTS
+# ================================================================
+
+PLANNING_SYSTEM_PROMPT = """You are a financial planning agent for startups. Your sole job is to decide which tools to call and in what order.
 
 AVAILABLE TOOLS:
-- calculate_burn_metrics: Computes burn rate, expenses, runway from loaded data
-- forecast_runway: Projects runway with Monte Carlo simulation  
-- model_scenario: Extracts hiring/firing scenario from user query
-- generate_recommendations: Creates actionable advice
+1. calculate_burn_metrics — Computes burn rate, runway, expenses, revenue metrics from loaded transaction data. Always call this FIRST if no metrics exist.
+2. forecast_runway — Projects runway using Monte Carlo simulation (P10/P50/P90 confidence intervals). Requires metrics to exist first.
+3. model_scenario — Extracts hiring/firing/revenue-change parameters from the user's natural language query. Call this BEFORE calculate_burn_metrics when the user describes a scenario change.
+4. generate_recommendations — Creates prioritized financial recommendations. Requires metrics to exist first.
 
-RULES:
-1. If user asks about burn/runway/expenses → MUST call calculate_burn_metrics FIRST
-2. If user asks "what if" or mentions hiring → MUST call model_scenario, then calculate_burn_metrics, then forecast_runway
-3. NEVER suggest asking user for data - it's already loaded
-4. Return JSON: {"plan": ["tool1"], "reasoning": "...", "response_hint": "..."}"""
+DECISION LOGIC:
+- User asks about burn/expenses/runway AND metrics don't exist → [calculate_burn_metrics]
+- User asks about runway AND metrics exist AND no forecast → [calculate_burn_metrics, forecast_runway]
+- User asks about runway AND forecast already exists → [] (no tools needed, just respond)
+- User mentions hiring/firing/"what if"/scenario changes → [model_scenario, calculate_burn_metrics, forecast_runway]
+- User asks for advice/recommendations → [calculate_burn_metrics, generate_recommendations]
+- User asks a follow-up about previous scenario → reuse existing data, only run what's needed
+- User greets or says thanks → [] (no tools needed)
+- If unsure, default to [calculate_burn_metrics, forecast_runway] to provide comprehensive data
+
+IMPORTANT:
+- NEVER skip calculate_burn_metrics if metrics don't exist
+- NEVER call forecast_runway before calculate_burn_metrics
+- ONLY call model_scenario when user describes a change/hiring/firing scenario
+- Return empty plan [] if all needed data already exists"""
 
 
-def plan_actions(user_query, state, conversation_history):
-    user_lower = user_query.lower()
-    has_metrics = state.get("computed_metrics") is not None
-    has_forecast = state.get("forecast_results") is not None
-    
-    # FORCE tool calls - skip LLM for financial queries
-    if any(w in user_lower for w in ["burn", "runway", "expense", "spending", "cash", "financial", "finance", "metric", "health"]):
-        if not has_metrics:
-            return {"plan": ["calculate_burn_metrics"], "reasoning": "Need metrics", "response_hint": "Show burn and runway"}
-        elif not has_forecast and "runway" in user_lower:
-            return {"plan": ["calculate_burn_metrics", "forecast_runway"], "reasoning": "Need forecast", "response_hint": "Show runway projections"}
-    
-    if any(w in user_lower for w in ["hire", "hiring", "what if", "scenario", "add", "employee", "salary"]):
-        return {"plan": ["model_scenario", "calculate_burn_metrics", "forecast_runway"], "reasoning": "Scenario analysis", "response_hint": "Show before/after impact"}
-    
-    if any(w in user_lower for w in ["recommend", "advice", "suggest", "what should"]):
-        return {"plan": ["calculate_burn_metrics", "forecast_runway", "generate_recommendations"], "reasoning": "Full analysis + advice", "response_hint": "Provide prioritized recommendations"}
-    
-    # Fallback to LLM
-    try:
-        return extract_json_from_llm(ROUTING_SYSTEM_PROMPT, f"Query: {user_query}", temperature=0.0)
-    except:
-        return {"plan": [], "reasoning": "Fallback", "response_hint": "General response"}
-    
+RESPONSE_SYSTEM_PROMPT = """You are FinCFO, a startup financial analyst.
 
-RESPONSE_SYSTEM_PROMPT = """You are FinCFO, an experienced startup CFO. Provide financial analysis with actionable insights.
+FORMAT RULES - FOLLOW EXACTLY:
+1. Use ### for section headers with ONE emoji
+2. Use - for bullet points  
+3. Write numbers like this: $85,000/month (NO ** around numbers)
+4. Only use **bold** for labels like **Gross Burn:** or **Net Burn:**
+5. Put a space after ** and before **
+6. Each bullet on its own line
+7. Max 6 lines total
+8. End with one actionable insight line starting with 💡
 
-FORMAT RULES:
-- Use ### for section headers (### 🔥 Burn Rate)
-- Use - for bullet points
-- Write numbers as: $85,000/month (no bold markers needed)
-- 4-6 lines of metrics + 1-2 lines of insight
-- Be concise but helpful
-
-FOR EACH QUERY TYPE, INCLUDE:
-
-**Burn Rate Query:**
-- Show gross burn, net burn, revenue, runway
-- Insight: Is the burn sustainable? What's the burn multiple?
-
-**Runway Query:**
-- Show cash, burn, months remaining
-- Insight: Is this comfortable? When should they fundraise?
-
-**Hiring Query:**
-- Show cost, new burn, runway impact
-- Insight: Can they afford this? What's the risk? Alternatives?
-
-**Recommendations:**
-- Top 3 prioritized actions
-- Insight: Which one has the biggest impact?
-
-EXAMPLE RESPONSES:
-
-### 🔥 Burn Rate
-- Gross Burn: $31,283/month
-- Net Burn: $116,283/month  
-- Revenue: $85,000/month
-- Runway: 10.3 months
-
-⚠️ Net burn exceeds revenue by $31K/month. At this rate, you have 10 months before cash runs out. Consider reducing recurring expenses by 15-20% or accelerating revenue collection.
-
-### 👥 Hiring Impact
-- 3 engineers at $5,000/month each
-- Additional cost: $15,000/month
-- New net burn: $131,283/month
-- Runway: 10.3 → 9.1 months
-
-⚠️ This reduces your runway by 1.2 months. You can afford this if revenue grows 10%+ in the next quarter. Alternative: hire 2 now and the 3rd in 6 months.
-
-### 💡 Recommendations
-- 🔴 Cut discretionary spending by 20% - saves $6,000/month
-- 🟠 Negotiate vendor contracts - potential 10% savings
-- 🟢 Accelerate invoice collection - improves cash flow
-
-Start with the first item to add 2 months to your runway immediately.
-
-Current Data:
+CURRENT DATA:
 {metrics_summary}
 
-History:
-{conversation_summary}"""
+RECOMMENDATIONS (if available):
+{recommendations_summary}
+
+CONTEXT:
+{conversation_summary}
+
+INSTRUCTIONS:
+- If recommendations exist, reference them naturally in your response
+- Use the enriched insights if provided (contextual_insight, priority_justification)
+- Keep response concise and actionable
+- Never make up numbers - use ONLY the data provided above"""
+
+# ================================================================
+# LLM INITIALIZATION WITH STRUCTURED OUTPUT
+# ================================================================
+
+# Initialize Groq via LangChain
+llm = ChatGroq(
+    model=settings.groq_model,
+    api_key=settings.groq_api_key,
+    temperature=0.0,
+    max_tokens=500,
+)
+
+# Create structured LLMs for each output type
+planning_llm = llm.with_structured_output(PlanResult)
+scenario_llm = llm.with_structured_output(ScenarioResult)
+
+
 # ================================================================
 # AGENT CORE FUNCTIONS
 # ================================================================
@@ -124,65 +187,74 @@ def plan_actions(
     state: Dict[str, Any],
     conversation_history: List[Dict[str, str]],
 ) -> Dict[str, Any]:
-    """Agent plans which tools to call based on user query."""
+    """
+    LLM-driven planning with Pydantic structured output.
+    ZERO keyword matching. Pure agentic planning.
     
+    The LLM receives:
+    - Available tools with descriptions
+    - Current state (what data exists)
+    - Conversation context (last 6 messages)
+    - User query
+    
+    Returns a validated PlanResult with:
+    - plan: List of tool names to execute
+    - reasoning: Why these tools were chosen
+    - response_hint: What to focus on in response
+    """
+    
+    # Build state context
     has_metrics = state.get("computed_metrics") is not None
     has_forecast = state.get("forecast_results") is not None
+    active_scenario = state.get("active_scenario", "none")
+    rec_count = len(state.get("recommendations", []))
     
-    # FORCE tool calls for financial queries
-    user_lower = user_query.lower()
+    # Build conversation context (last 3 exchanges = 6 messages)
+    context_lines = []
+    for msg in conversation_history[-4:]:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")[:150]
+        context_lines.append(f"{role}: {content}")
+    context_str = "\n".join(context_lines) if context_lines else "No previous messages"
     
-    # If user asks about finances and we DON'T have metrics, FORCE burn calculation
-    if not has_metrics and any(w in user_lower for w in ["burn", "expense", "spending", "cash", "runway", "financial", "finance"]):
-        logger.info("⚡ FORCING calculate_burn_metrics (user asked about finances, no metrics yet)")
-        return {
-            "plan": ["calculate_burn_metrics"],
-            "reasoning": "User asked about financials, need to compute metrics first",
-            "response_hint": "Show burn rate, expenses, and runway from computed metrics"
-        }
-    
-    # If user asks about runway and we have metrics but no forecast
-    if has_metrics and not has_forecast and any(w in user_lower for w in ["runway", "how long", "forecast", "survive"]):
-        logger.info("⚡ FORCING forecast_runway (user asked about runway, no forecast yet)")
-        return {
-            "plan": ["forecast_runway"],
-            "reasoning": "User asked about runway, need forecast",
-            "response_hint": "Show runway projections with P10/P50/P90"
-        }
-    
-    # If user asks about hiring/scenario
-    if any(w in user_lower for w in ["hire", "hiring", "what if", "scenario", "add", "employee"]):
-        logger.info("⚡ FORCING scenario → burn → forecast (hiring query)")
-        return {
-            "plan": ["model_scenario", "calculate_burn_metrics", "forecast_runway"],
-            "reasoning": "User wants scenario analysis",
-            "response_hint": "Show before/after impact of scenario on burn and runway"
-        }
-    
-    # If user asks for recommendations and we have metrics
-    if has_metrics and any(w in user_lower for w in ["recommend", "advice", "suggest", "what should"]):
-        logger.info("⚡ FORCING generate_recommendations")
-        return {
-            "plan": ["generate_recommendations"],
-            "reasoning": "User wants recommendations",
-            "response_hint": "Provide actionable recommendations with priorities"
-        }
-    
-    # For everything else, use LLM to plan
+    # Build the state context string
+    state_context = f"""CURRENT STATE:
+        - Metrics computed: {"✅ yes" if has_metrics else "❌ no (needs calculation)"}
+        - Forecast available: {"✅ yes" if has_forecast else "❌ no (needs projection)"}
+        - Active scenario: {active_scenario}
+        - Recommendations available: {rec_count}
+
+        CONVERSATION HISTORY (last 3 exchanges):
+        {context_str}
+
+        USER QUERY:
+        {user_query}
+
+        Based on the above, which tools should I call? Return your plan."""
+
     try:
-        state_summary = f"metrics={'✅' if has_metrics else '❌'}, forecast={'✅' if has_forecast else '❌'}"
-        full_prompt = f"{state_summary}\n\nUser query: {user_query}"
+        # Call LLM with structured output — returns PlanResult, not raw text
+        result: PlanResult = planning_llm.invoke([
+            SystemMessage(content=PLANNING_SYSTEM_PROMPT),
+            HumanMessage(content=state_context),
+        ])
         
-        plan = extract_json_from_llm(
-            system_prompt=ROUTING_SYSTEM_PROMPT,
-            user_message=full_prompt,
-            temperature=0.1,
-        )
-        logger.info(f"Agent plan: {plan.get('plan', [])} - {plan.get('reasoning', '')}")
-        return plan
+        logger.info(f"🧠 Plan: {result.plan} — {result.reasoning[:80]}")
+        
+        return {
+            "plan": result.plan,
+            "reasoning": result.reasoning,
+            "response_hint": result.response_hint,
+        }
+        
     except Exception as e:
-        logger.error(f"Planning failed: {e}")
-        return {"plan": [], "reasoning": "Fallback", "response_hint": "General response"}
+        logger.error(f"Planning failed: {e}", exc_info=True)
+        # Fallback: compute baseline metrics
+        return {
+            "plan": ["calculate_burn_metrics", "forecast_runway"],
+            "reasoning": "Planning error, recomputing comprehensive baseline",
+            "response_hint": "Show current financial status with runway projections"
+        }
 
 
 def execute_plan(
@@ -190,7 +262,10 @@ def execute_plan(
     state: Dict[str, Any],
     user_query: str,
 ) -> Dict[str, Any]:
-    """Execute a sequence of tool calls. Updates state with results from each tool."""
+    """
+    Execute a sequence of tool calls deterministically.
+    Each tool updates the state with its results.
+    """
     results = {}
     
     for tool_name in plan:
@@ -198,9 +273,9 @@ def execute_plan(
             logger.warning(f"Unknown tool in plan: {tool_name}")
             continue
         
-        logger.info(f"Executing tool: {tool_name}")
+        logger.info(f"🔧 Executing: {tool_name}")
         
-        # Prepare tool arguments
+        # Prepare tool arguments based on tool type
         tool_args = {"state": state}
         
         if tool_name == "model_scenario":
@@ -211,44 +286,53 @@ def execute_plan(
                 "active_scenario": state.get("active_scenario"),
             }
         
+        # Execute the tool
         result = execute_tool(tool_name, tool_args, state)
         results[tool_name] = result
         
-        # ================================================================
-        # KEY FIX: Update state with tool results
-        # ================================================================
-        
-        if tool_name == "model_scenario" and "error" not in str(result):
-            if result.get("action") not in ["none", None]:
-                # Store extracted scenario data
-                state["scenario_overrides"] = {
-                    "headcount_change": result.get("count", 0),
-                    "avg_salary": (result.get("salary") or 8000) * 12,  # Convert monthly to annual
-                    "revenue_change": result.get("revenue_change"),
-                    "one_time_expenses": result.get("one_time_expenses"),
-                    "ramp_months": 3,
-                }
-                state["active_scenario"] = f"hire_{result.get('count', 0)}_{result.get('role', 'employees')}"
-                state["requires_recompute"] = True
-                logger.info(f"📋 Scenario stored: {state['scenario_overrides']}")
-        
-        if tool_name == "calculate_burn_metrics" and "error" not in str(result):
-            # Store computed metrics
-            if isinstance(result, dict):
-                state["computed_metrics"] = result.get("metrics", result)
-            state["requires_recompute"] = False
-            logger.info(f"📊 Metrics stored: net_burn=${state.get('computed_metrics', {}).get('net_burn', 'N/A')}")
-        
-        if tool_name == "forecast_runway" and "error" not in str(result):
-            state["runway_forecast"] = result
-            logger.info(f"✈️ Forecast stored: p50={result.get('p50_months', 'N/A')} months")
-        
-        if tool_name == "generate_recommendations":
-            if isinstance(result, list):
-                state["recommendations"] = result
-            logger.info(f"💡 Recommendations stored: {len(state.get('recommendations', []))} items")
+        # Update state with tool results
+        _update_state_from_tool(tool_name, result, state)
     
     return results
+
+
+def _update_state_from_tool(tool_name: str, result: Any, state: Dict[str, Any]) -> None:
+    """Update global state based on tool execution results."""
+    
+    if "error" in str(result):
+        logger.warning(f"Tool {tool_name} returned error: {result}")
+        return
+    
+    if tool_name == "model_scenario":
+        if result.get("action") not in ["none", None]:
+            state["scenario_overrides"] = {
+                "headcount_change": result.get("count", 0),
+                "avg_salary": (result.get("salary") or 8000) * 12,
+                "revenue_change": result.get("revenue_change"),
+                "one_time_expenses": result.get("one_time_expenses"),
+                "ramp_months": 3,
+            }
+            state["active_scenario"] = f"hire_{result.get('count', 0)}_{result.get('role', 'employees')}"
+            state["requires_recompute"] = True
+            logger.info(f"📋 Scenario stored: {state['scenario_overrides']}")
+    
+    elif tool_name == "calculate_burn_metrics":
+        if isinstance(result, dict):
+            state["computed_metrics"] = result.get("metrics", result)
+        state["requires_recompute"] = False
+        logger.info(f"📊 Metrics stored")
+    
+    elif tool_name == "forecast_runway":
+        state["runway_forecast"] = result
+        logger.info(f"✈️ Forecast stored")
+    
+    elif tool_name == "generate_recommendations":
+        if isinstance(result, list):
+            state["recommendations"] = result
+        logger.info(f"💡 Recommendations stored: {len(state.get('recommendations', []))} items")
+
+
+# In generate_final_response, use the structured data
 
 def generate_final_response(
     user_query: str,
@@ -257,63 +341,59 @@ def generate_final_response(
     plan_results: Dict[str, Any],
     response_hint: str = "",
 ) -> str:
-    """
-    Generate the final user-facing response using all computed data.
-    """
-    # Build metrics summary from state
-    metrics = state.get("computed_metrics", {}) or {}
-    runway = state.get("runway_forecast", {}) or {}
-    recommendations = state.get("recommendations", []) or []
-    scenario = state.get("active_scenario")
+    """Generate final response with enriched recommendations."""
+    metrics = state.get("computed_metrics") or {}
+    runway = state.get("runway_forecast") or {}
+    recommendations = state.get("recommendations") or []
     
-    
+    # Build metrics summary
     metrics_summary = f"""
-        Cash: ${metrics.get('cash_balance', 0):,.0f}
+        Cash Balance: ${metrics.get('cash_balance', 0):,.0f}
         Gross Burn: ${metrics.get('gross_burn', 0):,.0f}/month
         Net Burn: ${metrics.get('net_burn', 0):,.0f}/month
-        Revenue: ${metrics.get('monthly_revenue', 0):,.0f}/month
-        One-Time Expenses: ${metrics.get('one_time_expenses', 0):,.0f}
-        Runway: {metrics.get('cash_runway_months', 0):.1f} months
-        P50 Runway: {runway.get('p50_months', runway.get('p50_days', 0)//30)} months
-        P10 Runway: {runway.get('p10_months', runway.get('p10_days', 0)//30)} months"""
+        Monthly Revenue: ${metrics.get('monthly_revenue', 0):,.0f}/month
+        Runway: {metrics.get('cash_runway_months', 0):.1f} months"""
             
-            # ... rest of the function
-    if metrics.get('net_burn'):
-        metrics_summary += f"""
-- Net Burn: ${metrics.get('net_burn'):,.0f}/month
-- Gross Burn: ${metrics.get('gross_burn', 0):,.0f}/month
-- Monthly Revenue: ${metrics.get('monthly_revenue', 0):,.0f}/month
-- One-Time Expenses: ${metrics.get('one_time_expenses', 0):,.0f}"""
-    
-    if runway.get('p50_months'):
-        metrics_summary += f"""
-- Runway: {runway['p50_months']} months (P50)
-- Pessimistic: {runway.get('p10_months', 'N/A')} months
-- Optimistic: {runway.get('p90_months', 'N/A')} months"""
-    
-    if scenario:
-        metrics_summary += f"\n- Active Scenario: {scenario}"
-    
+    # Build enriched recommendations summary
+    rec_summary = "No recommendations available."
     if recommendations:
-        metrics_summary += f"\n- Recommendations available: {len(recommendations)}"
+        rec_lines = []
+        for rec in recommendations[:3]:
+            priority = rec.get('priority', 'MEDIUM')
+            title = rec.get('title', '')
+            
+            # Include enriched insights if available
+            insight = rec.get('contextual_insight', '')
+            if insight:
+                rec_lines.append(f"- {priority}: {title} — {insight[:80]}...")
+            else:
+                rec_lines.append(f"- {priority}: {title}")
+        rec_summary = "\n".join(rec_lines)
     
-    # Build conversation summary
-    conversation_summary = ""
-    for msg in conversation_history[-4:]:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")[:100]
-        conversation_summary += f"{role}: {content}\n"
-    
-    # Build system prompt with real data
-    system_prompt = RESPONSE_SYSTEM_PROMPT.format(
-        metrics_summary=metrics_summary,
-        conversation_summary=conversation_summary or "No previous context",
-    )
+    # Build system prompt
+    system_prompt = f"""
+        You are FinCFO, a startup financial analyst.
+
+        **METRICS:**
+        {metrics_summary}
+
+        **RECOMMENDATIONS:**
+        {rec_summary}
+
+        **INSTRUCTIONS:**
+        1. Use ONLY the numbers provided above
+        2. Reference recommendations naturally
+        3. Keep response concise and actionable
+        4. Use ### for section headers with ONE emoji
+        5. Use - for bullet points
+        6. End with 💡 actionable insight
+        """
     
     if response_hint:
-        system_prompt += f"\n\n**Focus area for this response:** {response_hint}"
+        system_prompt += f"\n**Focus area:** {response_hint}"
     
     try:
+        from services.llm_service import call_llm_with_history
         response = call_llm_with_history(
             system_prompt=system_prompt,
             conversation_history=conversation_history,
@@ -326,9 +406,8 @@ def generate_final_response(
         logger.error(f"Response generation failed: {e}")
         return generate_fallback_response(state)
 
-
 def generate_fallback_response(state: Dict[str, Any]) -> str:
-    """Fallback response if LLM fails."""
+    """Deterministic fallback if LLM fails."""
     metrics = state.get("computed_metrics", {}) or {}
     runway = state.get("runway_forecast", {}) or {}
     
@@ -340,7 +419,8 @@ def generate_fallback_response(state: Dict[str, Any]) -> str:
         parts.append(f"- **Revenue:** ${metrics.get('monthly_revenue', 0):,.0f}/month")
     
     if runway:
-        parts.append(f"- **Runway:** {runway.get('p50_months', runway.get('p50_days', 0)//30)} months")
+        p50 = runway.get('p50_months', runway.get('p50_days', 0)//30)
+        parts.append(f"- **Runway:** {p50} months")
     
     parts.append(f"\n💬 Ask me about burn rate, runway, hiring scenarios, or recommendations!")
     
@@ -354,20 +434,24 @@ def run_agent(
 ) -> str:
     """
     Main agent loop: Plan → Execute → Respond
+    
+    1. Plan: LLM decides which tools to call (structured output via Pydantic)
+    2. Execute: Tools run deterministically, updating state
+    3. Respond: LLM generates contextual response using computed data
     """
     logger.info(f"🤖 Agent processing: {user_query[:80]}...")
     
-    # Step 1: Plan
+    # Step 1: Plan — LLM-driven with Pydantic schema enforcement
     plan = plan_actions(user_query, state, conversation_history)
     actions = plan.get("plan", [])
     response_hint = plan.get("response_hint", "")
     
-    # Step 2: Execute
+    # Step 2: Execute — Deterministic tool calls
     plan_results = {}
     if actions:
         plan_results = execute_plan(actions, state, user_query)
     
-    # Step 3: Generate response
+    # Step 3: Respond — LLM generates final response with real data
     response = generate_final_response(
         user_query=user_query,
         state=state,

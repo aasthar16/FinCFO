@@ -12,9 +12,13 @@ from graph.nodes.scenario import scenario_node
 from graph.nodes.burn_expense import burn_expense_node
 from graph.nodes.forecast import forecast_node
 from graph.nodes.recommendation import recommendation_node
+# from graph.config.database import postgres_config
+
+
 
 
 def build_ai_cfo_graph(checkpointer: Optional[MemorySaver] = None, use_v2: bool = True):
+
     """
     Build the LangGraph workflow.
     

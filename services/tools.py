@@ -8,6 +8,29 @@ import json
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from services.compute_burn import compute_burn, convert_to_serializable
+from utils.helpers import generate_mock_transactions
+import pandas as pd
+from services.forecasting import forecast_cash_runway, convert_to_serializable
+from services.llm_service import extract_json_from_llm
+from services.forecasting import generate_recommendations
+from services.llm_service import call_llm
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
+from services.schemas import ScenarioExtractionResult
+from settings import settings
+
+# Initialize Groq
+llm = ChatGroq(
+    model=settings.groq_model,
+    api_key=settings.groq_api_key,
+    temperature=0.0,
+    max_tokens=500,
+)
+
+# Create structured LLM for scenario extraction
+scenario_llm = llm.with_structured_output(ScenarioExtractionResult)
+    
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +146,7 @@ def tool_calculate_burn(
     scenario_overrides: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Tool: Calculate burn metrics."""
-    from services.compute_burn import compute_burn, convert_to_serializable
-    from utils.helpers import generate_mock_transactions
-    import pandas as pd
+    
     
     transactions_data = state.get("transactions_data", [])
     if transactions_data:
@@ -161,7 +182,7 @@ def tool_forecast_runway(
     forecast_months: int = 24
 ) -> Dict[str, Any]:
     """Tool: Forecast cash runway."""
-    from services.forecasting import forecast_cash_runway, convert_to_serializable
+    
     
     metrics = state.get("computed_metrics") or {}
     
@@ -193,95 +214,102 @@ def tool_model_scenario(
 ) -> Dict[str, Any]:
     """
     Tool: Extract scenario parameters from natural language.
-    Uses LLM for structured extraction.
+    Uses Pydantic structured output - NO regex parsing!
     """
-    from services.llm_service import extract_json_from_llm
     
+    # Build previous context if available
     context_str = ""
     if previous_context:
-        context_str = f"\nPrevious context: {json.dumps(previous_context)}"
+        context_str = f"""
+            Previous scenario context:
+            - Total headcount change so far: {previous_context.get('total_headcount', 0)}
+            - Average salary: ${previous_context.get('avg_salary', 'N/A')}
+            - Active scenario: {previous_context.get('active_scenario', 'None')}
+            """
     
     system_prompt = f"""You are a financial scenario parser. Extract hiring/firing/business change parameters from user queries.
 
-Return a JSON object with these fields:
-{{
-    "action": "hire|fire|replace|revenue_change|expense_change|none",
-    "count": <number of people to hire/fire>,
-    "role": "<job role if mentioned, else 'employee'>",
-    "salary": <monthly salary per person, null if not mentioned>,
-    "headcount_change": <net change in headcount (+ for hire, - for fire)>,
-    "revenue_change": <change in monthly revenue, null if N/A>,
-    "one_time_expenses": <one-time expense amount, null if N/A>,
-    "is_addition": <true if adding to previous scenario, false if new scenario>,
-    "explanation": "<brief explanation of what was parsed>"
-}}
+RULES:
+1. "hire 2 engineers at $8000/month" → action:hire, count:2, role:engineer, salary:8000
+2. "add 3 more at same salary" → action:hire, count:3, salary:null, is_addition:true
+3. "replace 2 designers with 3 engineers" → action:replace, count:3, role:engineer
+4. "what if revenue grows 20%" → action:revenue_change, calculate revenue_change from context
+5. "fire 2 salespeople" → action:fire, count:2, role:salesperson
+6. For "same salary/pay/rate", set salary:null and is_addition:true
+7. If no specific action found, return action:"none"
+8. Handle typos gracefully (ppl=people, aat=at, etc.)
 
-Rules:
-- "hire 2 engineers at $8000/month" → action:hire, count:2, role:engineer, salary:8000
-- "add 3 more at same salary" → action:hire, count:3, salary:null, is_addition:true
-- "replace 2 designers with 3 engineers at $9000" → action:replace, count:3, role:engineer, salary:9000
-- "what if revenue grows 20%" → action:revenue_change, revenue_change: <calculated>
-- "fire 2 salespeople" → action:fire, count:2, role:salesperson
-- For "same salary/pay/rate", set salary:null and is_addition:true
-- If no specific action found, return action:"none"
-- Handle typos gracefully (ppl=people, aat=at, etc.){context_str}"""
+{context_str}
 
-    result = extract_json_from_llm(
-        system_prompt=system_prompt,
-        user_message=user_query,
-        temperature=0.0,
-    )
+Return the extracted scenario parameters in the structured format."""
     
-    return result
+    try:
+        # Call LLM with structured output - RETURNS Pydantic object directly!
+        result: ScenarioExtractionResult = scenario_llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_query),
+        ])
+        
+        # Convert to dict for storage
+        return result.model_dump()
+        
+    except Exception as e:
+        logger.error(f"Scenario extraction failed: {e}")
+        # Return default empty scenario
+        return {
+            "action": "none",
+            "count": 0,
+            "role": "employee",
+            "salary": None,
+            "headcount_change": 0,
+            "revenue_change": None,
+            "one_time_expenses": None,
+            "is_addition": False,
+            "explanation": f"Failed to parse: {e}",
+        }
 
 def tool_generate_recommendations(
-    state: Dict[str, Any],
-    priority_areas: Optional[List[str]] = None
+    state: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Tool: Generate recommendations."""
-    from services.forecasting import generate_recommendations
-    from services.llm_service import call_llm
+    """Tool: Generate recommendations with LLM enrichment."""
     
     metrics = state.get("computed_metrics") or {}
     forecast = state.get("forecast_results") or {}
-    runway = state.get("runway_forecast") or {}
+    runway_data = state.get("runway_forecast") or {}
     
-    # Get base recommendations
-    base_recs = state.get("recommendations") or []
-    
-    # If no recommendations exist, generate them
-    if not base_recs and metrics:
+    # Reconstruct runway forecast if needed
+    runway_forecast = None
+    if runway_data:
         try:
-            base_recs = generate_recommendations(
-                burn_metrics={"metrics": metrics},
-                forecast_results=forecast,
-                runway_forecast=None,
+            from services.forecasting import CashRunwayForecast
+            from datetime import datetime
+            runway_forecast = CashRunwayForecast(
+                p10_date=datetime.fromisoformat(runway_data.get("p10_date", datetime.now().isoformat())),
+                p50_date=datetime.fromisoformat(runway_data.get("p50_date", datetime.now().isoformat())),
+                p90_date=datetime.fromisoformat(runway_data.get("p90_date", datetime.now().isoformat())),
+                p10_days=runway_data.get("p10_days", 180),
+                p50_days=runway_data.get("p50_days", 365),
+                p90_days=runway_data.get("p90_days", 540),
+                model_accuracy=0.8,
+                assumptions={},
             )
-        except Exception as e:
-            logger.warning(f"Failed to generate recommendations: {e}")
-            base_recs = []
-    
-    # Enhance with LLM
-    if priority_areas and base_recs:
-        try:
-            system_prompt = f"""Enhance financial recommendations. Focus: {', '.join(priority_areas)}.
-Current: Cash=${metrics.get('cash_balance', 0):,.0f}, Burn=${metrics.get('net_burn', 0):,.0f}/month.
-Existing: {json.dumps(base_recs[:3], indent=2)}
-Return enhanced as JSON array."""
-            
-            enhanced = call_llm(system_prompt=system_prompt, user_message="Enhance recommendations", temperature=0.3)
-            import re
-            json_match = re.search(r'\[.*\]', enhanced, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
         except:
             pass
     
-    return base_recs if base_recs else [
-        {"priority": "MEDIUM", "title": "Review Expenses", "description": "Analyze spending patterns", "suggested_actions": ["Review vendor contracts", "Reduce discretionary spending"]}
-    ]
+    # Generate hybrid recommendations (deterministic + LLM enrichment)
+    from services.recommendations import generate_recommendations as generate_hybrid_recs
+    
+    recs = generate_hybrid_recs(
+        burn_metrics={"metrics": metrics},
+        forecast_results=forecast,
+        runway_forecast=runway_forecast,
+        state=state,
+        enable_llm_enrichment=True,  # Always enable for Phase 2
+    )
+    
+    return recs
 
-# ================================================================
+# ===============================================================
 # TOOL DISPATCHER
 # ================================================================
 
@@ -308,8 +336,8 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any], state: Dict[str, Any
             )
         elif tool_name == "generate_recommendations":
             return tool_fn(
-                state=state,
-                priority_areas=tool_args.get("priority_areas"),
+                state=state
+                # priority_areas=tool_args.get("priority_areas"),
             )
         elif tool_name == "forecast_runway":
             return tool_fn(

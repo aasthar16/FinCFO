@@ -48,14 +48,17 @@ def save_user_chat(email: str, chat_name: str, messages: list):
 def get_user_chats(email: str) -> list:
     """Get all chats for a user."""
     chats = get_user_chats_from_db(email)
-    # Ensure messages are in correct format
+    # Ensure messages are in correct format, cleaning of chat["messages"], cut down on all invalid messages
+
     for chat in chats:
         if "messages" in chat:
             valid_msgs = []
             for msg in chat["messages"]:
                 if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                    valid_msgs.append(msg)
+                    valid_msgs.append(msg) 
             chat["messages"] = valid_msgs
+
+            # updated messages sent.
     return chats
 
 

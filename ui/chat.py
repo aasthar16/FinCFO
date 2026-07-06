@@ -19,7 +19,7 @@ def render_chat_history():
     email = user["email"]
     
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 💬 Chat History")
+    st.sidebar.markdown("## 💬 Chat History")
     
     chats = get_user_chats(email)
     
@@ -86,9 +86,11 @@ def render_chat(messages: List[Dict[str, Any]], on_submit: Callable):
             role = "user" if hasattr(message, 'type') and message.type == "human" else "assistant"
             content = message.content if hasattr(message, 'content') else str(message)
         
+
         if role == "user":
+            #  here "user" is a author. The author (role) is important because it tells Streamlit who sent the message, allowing it to render the conversation appropriately. It makes chat readable.
             with st.chat_message("user", avatar="👤"):
-                st.write(content)
+                st.write(content)  
         else:
             with st.chat_message("assistant", avatar="🤖"):
                 st.markdown(content)
@@ -98,6 +100,8 @@ def render_chat(messages: List[Dict[str, Any]], on_submit: Callable):
     if prompt:
         on_submit(prompt)
         
+
+
 def render_quick_actions(on_action: Callable):
     """
     Render quick action buttons.

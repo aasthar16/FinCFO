@@ -113,7 +113,7 @@ def call_llm_with_history(
     except Exception as e:
         logger.error(f"Groq API error: {e}")
         raise
-
+ 
 
 def extract_json_from_llm(
     system_prompt: str,

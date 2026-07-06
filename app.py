@@ -37,7 +37,7 @@ def get_default_profile():
     return {"name": "", "stage": "Seed", "currency": "USD", "industry": None, "country": None, "founded_date": None}
 
 
-def init_session_state():
+def init_session_state():   
     """Initialize Streamlit session state."""
     if "widget_counter" not in st.session_state:
         st.session_state.widget_counter = 0
@@ -51,6 +51,7 @@ def init_session_state():
     if "startup_profile" not in st.session_state:
         st.session_state.startup_profile = get_default_profile()
     if "state" not in st.session_state:
+        # change this , no unecessary transactions
         transactions = generate_mock_transactions(months=6)
         transactions_data = transactions.to_dict('records') if transactions is not None else []
         st.session_state.state = {
@@ -539,6 +540,8 @@ def handle_query(prompt: str):
                     last_msg = result["messages"][-1]
                     if isinstance(last_msg, AIMessage):
                         content = last_msg.content
+
+                        # check if we need to remove this line
                     elif isinstance(last_msg, dict):
                         content = last_msg.get("content", "")
                     else:
@@ -563,6 +566,8 @@ def handle_query(prompt: str):
                 "content": f"❌ Error: {str(e)}"
             })
             st.error(f"❌ Error: {str(e)}")
+
+
 
 def clean_response(content: str) -> str:
     """Clean and normalize LLM response for proper markdown rendering."""

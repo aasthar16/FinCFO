@@ -66,7 +66,7 @@ def render_startup_profile(current_profile: Dict[str, Any]) -> Dict[str, Any]:
                 founded_date_val = None
         else:
             founded_date_val = None
-        
+          
         founded_date = st.date_input(
             "Founded Date (Optional)",
             value=founded_date_val,

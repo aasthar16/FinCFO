@@ -19,7 +19,7 @@ class Settings:
     
     # ===== Optional with defaults =====
     # App
-    app_name: str = "AI CFO"
+    app_name: str = "FinCFO"
     app_version: str = "1.0.0"
     
     # LLM

@@ -40,6 +40,8 @@ def forecast_node(state: GlobalState) -> Dict[str, Any]:
         dates = pd.date_range(start=datetime.now() - timedelta(days=180), periods=6, freq='M')
         monthly_revenue = float(metrics.get("monthly_revenue", 100000))
         
+
+        # New Revenue=Current Revenue×(1 + Expected Growth + Random Business Fluctuation)
         revenue_df = pd.DataFrame({
             'ds': dates,
             'revenue': monthly_revenue * (1 + np.linspace(0.01, 0.10, 6) + np.random.normal(0, 0.02, 6))
@@ -99,16 +101,17 @@ def forecast_node(state: GlobalState) -> Dict[str, Any]:
     return {
         "forecast_results": convert_to_serializable({
             "revenue": {
+                #  get every key except model in the dict and add in revenue as k:v
                 k: v for k, v in revenue_forecast.items() 
                 if k not in ["model"]
             },
-            "expense": {
+            "expense": { 
                 k: v for k, v in expense_forecast.items() 
                 if k not in ["model"]
             },
         }),
         "runway_forecast": convert_to_serializable({
-            "p10_date": runway_forecast.p10_date.isoformat(),
+            "p10_date": runway_forecast.p10_date.isoformat(),  #formatting date returned by forecast_cash_runway to isoformat for serialization to convert into json
             "p50_date": runway_forecast.p50_date.isoformat(),
             "p90_date": runway_forecast.p90_date.isoformat(),
             "p10_days": runway_forecast.p10_days,

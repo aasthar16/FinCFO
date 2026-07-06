@@ -218,33 +218,5 @@ def _apply_scenario(
     
     return new_gross_burn, new_net_burn, new_one_time
 
-def _apply_scenario(
-    gross_burn: float,
-    net_burn: float,
-    one_time_expenses: float,
-    scenario_overrides: Dict[str, Any],
-    fully_loaded_ratio: float,
-) -> Tuple[float, float, float]:
-    """Apply scenario overrides to burn metrics."""
-    new_gross_burn = float(gross_burn)
-    new_net_burn = float(net_burn)
-    new_one_time = float(one_time_expenses)
-    
-    if "headcount_change" in scenario_overrides:
-        headcount_delta = float(scenario_overrides["headcount_change"])
-        avg_salary = float(scenario_overrides.get("avg_salary", 120000))
-        fully_loaded_cost = float(avg_salary / 12 * fully_loaded_ratio * headcount_delta)
-        ramp_months = float(scenario_overrides.get("ramp_months", 3))
-        ramp_factor = float(1 / ramp_months)
-        
-        new_gross_burn += float(fully_loaded_cost * ramp_factor)
-        new_net_burn += float(fully_loaded_cost * ramp_factor)
-    
-    if "revenue_change" in scenario_overrides:
-        revenue_delta = float(scenario_overrides["revenue_change"])
-        new_net_burn -= float(revenue_delta)
-    
-    if "one_time_expenses" in scenario_overrides:
-        new_one_time += float(scenario_overrides["one_time_expenses"])
-    
-    return new_gross_burn, new_net_burn, new_one_time
+
+
