@@ -39,11 +39,58 @@ def render_startup_profile(current_profile: Dict[str, Any]) -> Dict[str, Any]:
     )
     
     # File upload
-    uploaded_df = handle_file_upload()
-    if uploaded_df is not None:
-        st.session_state.transactions_df = uploaded_df
-        st.sidebar.success("✅ Data loaded successfully!")
-    
+    # In render_startup_profile(), replace the file upload section:
+
+# File upload - store raw file in state
+    st.sidebar.markdown("### 📁 Upload Data")
+
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload CSV or Excel file",
+        type=['csv', 'xlsx', 'xls'],
+        help="Upload your transaction data for analysis",
+        key="file_uploader"
+    )
+
+    if uploaded_file is not None:
+        try:
+            # Read file content
+            file_content = uploaded_file.read()
+            
+            # Store in state as raw file
+            if "state" in st.session_state:
+                # Check if file already uploaded
+                existing_files = st.session_state.state.get("raw_files", [])
+                existing_names = [f.get("filename") for f in existing_files]
+                
+                if uploaded_file.name not in existing_names:
+                    st.session_state.state["raw_files"].append({
+                        "filename": uploaded_file.name,
+                        "content": file_content,
+                        "type": uploaded_file.type,
+                    })
+                    st.session_state.state["parsing_status"] = "pending"
+                    st.sidebar.success(f"✅ Uploaded: {uploaded_file.name}")
+                    st.rerun()
+                else:
+                    st.sidebar.info(f"ℹ️ {uploaded_file.name} already uploaded")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error reading file: {e}")
+
+    # Show uploaded files
+    raw_files = st.session_state.state.get("raw_files", [])
+    if raw_files:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 📄 Uploaded Files")
+        for f in raw_files:
+            col1, col2 = st.sidebar.columns([3, 1])
+            with col1:
+                st.sidebar.caption(f"📎 {f.get('filename')}")
+            with col2:
+                if st.sidebar.button("🗑️", key=f"remove_{f.get('filename')}"):
+                    st.session_state.state["raw_files"] = [rf for rf in raw_files if rf.get("filename") != f.get("filename")]
+                    if not st.session_state.state["raw_files"]:
+                        st.session_state.state["parsing_status"] = "no_files"
+                    st.rerun()
     # Additional details
     with st.sidebar.expander("📋 Additional Details (Optional)"):
         industry = st.text_input(

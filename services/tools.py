@@ -140,21 +140,24 @@ TOOLS_SCHEMA = [
 # ================================================================
 # TOOL IMPLEMENTATIONS (wrapping existing math)
 # ================================================================
-
 def tool_calculate_burn(
     state: Dict[str, Any],
     scenario_overrides: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Tool: Calculate burn metrics."""
     
-    
+    # Use parsed transactions from state
     transactions_data = state.get("transactions_data", [])
-    if transactions_data:
+    
+    if not transactions_data:
+        # If no transactions, generate mock data for demo
+        logger.warning("No transactions found, using mock data")
+        transactions_df = generate_mock_transactions(months=6)
+    else:
         transactions_df = pd.DataFrame(transactions_data)
         if 'date' in transactions_df.columns:
             transactions_df['date'] = pd.to_datetime(transactions_df['date'])
-    else:
-        transactions_df = generate_mock_transactions(months=6)
+    
     
     cash_balance = float(state.get("cash_balance", 1200000))
     monthly_revenue = float(state.get("monthly_revenue", 85000))
@@ -283,19 +286,23 @@ def tool_generate_recommendations(
         try:
             from services.forecasting import CashRunwayForecast
             from datetime import datetime
+            
+            def parse_date(date_str):
+                if not date_str:
+                    return datetime.now()
+                return datetime.fromisoformat(date_str)
+            
             runway_forecast = CashRunwayForecast(
-                p10_date=datetime.fromisoformat(runway_data.get("p10_date", datetime.now().isoformat())),
-                p50_date=datetime.fromisoformat(runway_data.get("p50_date", datetime.now().isoformat())),
-                p90_date=datetime.fromisoformat(runway_data.get("p90_date", datetime.now().isoformat())),
+                p10_date=parse_date(runway_data.get("p10_date")),
+                p50_date=parse_date(runway_data.get("p50_date")),
+                p90_date=parse_date(runway_data.get("p90_date")),
                 p10_days=runway_data.get("p10_days", 180),
                 p50_days=runway_data.get("p50_days", 365),
                 p90_days=runway_data.get("p90_days", 540),
-                model_accuracy=0.8,
-                assumptions={},
+                assumptions=runway_data.get("assumptions", {}),
             )
-        except:
-            pass
-    
+        except Exception as e:
+            logger.warning(f"Failed to reconstruct runway forecast: {e}")
     # Generate hybrid recommendations (deterministic + LLM enrichment)
     from services.recommendations import generate_recommendations as generate_hybrid_recs
     

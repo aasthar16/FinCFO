@@ -23,7 +23,7 @@ class Settings:
     app_version: str = "1.0.0"
     
     # LLM
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "llama-3.1-8b-instant"
     
     # LangSmith (observability - optional)
     langsmith_api_key: Optional[str] = None

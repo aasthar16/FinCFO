@@ -55,6 +55,7 @@ def generate_recommendations(
     # ============================================================
     
     # Check cash runway
+        # Check cash runway
     if runway_forecast and runway_forecast.p50_days < 180:
         recommendations.append({
             "priority": "HIGH",
@@ -192,66 +193,91 @@ def _enrich_recommendations_with_llm_structured(
 ) -> List[Dict[str, Any]]:
     """
     Enrich recommendations using LLM with Pydantic structured output.
+    PRESERVES original deterministic titles/descriptions, only adds enrichment fields.
     """
     if not recommendations:
         return []
-    
-    # Build context for LLM
+   
     startup_profile = state.get("startup_profile", {})
+    
+    # Safely extract metrics
+    cash_balance = getattr(metrics, 'cash_balance', 0) if hasattr(metrics, 'cash_balance') else 0
+    runway_months = getattr(metrics, 'cash_runway_months', 0) if hasattr(metrics, 'cash_runway_months') else 0
+    net_burn = getattr(metrics, 'net_burn', 0) if hasattr(metrics, 'net_burn') else 0
+    monthly_revenue = getattr(metrics, 'monthly_revenue', 0) if hasattr(metrics, 'monthly_revenue') else 0
+    
     context = {
         "startup_stage": startup_profile.get("stage", "Seed"),
         "currency": startup_profile.get("currency", "USD"),
         "industry": startup_profile.get("industry", "Not specified"),
-        "cash_balance": metrics.cash_balance if hasattr(metrics, 'cash_balance') else 0,
-        "runway_months": metrics.cash_runway_months if hasattr(metrics, 'cash_runway_months') else 0,
+        "cash_balance": cash_balance,
+        "runway_months": runway_months,
+        "net_burn": net_burn,
+        "monthly_revenue": monthly_revenue,
     }
     
-    # Build the prompt
+    # Build the prompt - EXPLICITLY tell LLM to keep original content
     enrichment_prompt = f"""
-You are a senior financial advisor for startups. Enrich these deterministic recommendations.
+You are a senior financial advisor for startups. Add enrichment context to these EXISTING recommendations. DO NOT change the titles or descriptions.
 
-**DETERMINISTIC RECOMMENDATIONS (FOUNDATION):**
+**EXISTING RECOMMENDATIONS (DO NOT MODIFY THESE FIELDS - title, description, suggested_actions, impact_estimate):**
 {json.dumps(recommendations, indent=2)}
 
-**STARTUP CONTEXT:**
+**ACTUAL FINANCIAL DATA (USE THESE EXACT NUMBERS):**
+- Cash Balance: {context['currency']} {context['cash_balance']:,.0f}
+- Net Burn: {context['currency']} {context['net_burn']:,.0f}/month
+- Monthly Revenue: {context['currency']} {context['monthly_revenue']:,.0f}/month
+- Runway: {context['runway_months']:.1f} months
 - Stage: {context['startup_stage']}
 - Industry: {context['industry']}
-- Cash Balance: {context['currency']} {context['cash_balance']:,.0f}
-- Runway: {context['runway_months']:.1f} months
 
-**ENRICHMENT GUIDELINES:**
-For each recommendation, add/enhance:
-1. **contextual_insight**: Specific to their startup stage
-2. **priority_justification**: Why this matters NOW
-3. **industry_best_practice**: Relevant benchmark
-4. **expected_roi**: Estimated ROI or timeline
+**YOUR TASK:**
+For EACH recommendation, add ONLY these enrichment fields (do NOT modify title/description/actions/impact):
+1. **contextual_insight**: Why this matters for a {context['startup_stage']}-stage {context['industry']} company with ${context['cash_balance']:,.0f} cash
+2. **priority_justification**: Why this is the right priority given {context['runway_months']:.1f} months runway
+3. **industry_best_practice**: What successful {context['startup_stage']}-stage startups do
+4. **expected_roi**: Estimated impact with actual numbers
 
 Also provide:
-- **overall_assessment**: Brief financial health summary
-- **key_priority**: The single most important action
+- **overall_assessment**: 1-2 sentence health summary using the ACTUAL numbers above
+- **key_priority**: Which single action matters most right now
 
-Return ONLY the enriched recommendations with the exact structure matching the schema.
+CRITICAL: Keep ALL original fields (title, description, suggested_actions, impact_estimate, priority, category) EXACTLY as provided. Only ADD the enrichment fields.
 """
     
     try:
-        # Call LLM with structured output - RETURNS Pydantic object directly!
+        # Call LLM with structured output
         result: EnrichedRecommendationsResponse = enrichment_llm.invoke([
             SystemMessage(content=enrichment_prompt),
-            HumanMessage(content="Enrich these recommendations with context"),
+            HumanMessage(content="Add enrichment context to these recommendations. Keep all original content."),
         ])
         
-        # Convert Pydantic objects to dicts
         enriched_recs = [rec.model_dump() for rec in result.recommendations]
         
-        # Add overall assessment and key priority to first recommendation's metadata
-        if enriched_recs and result.overall_assessment:
-            enriched_recs[0]["overall_assessment"] = result.overall_assessment
-        if enriched_recs and result.key_priority:
-            enriched_recs[0]["key_priority"] = result.key_priority
+        # MERGE enrichment fields into original recommendations (preserve originals!)
+        merged_recs = []
+        for i, orig_rec in enumerate(recommendations):
+            merged = dict(orig_rec)  # Start with original deterministic content
+            
+            # If LLM returned a corresponding enriched version, add its enrichment fields
+            if i < len(enriched_recs):
+                enriched = enriched_recs[i]
+                for field in ['contextual_insight', 'priority_justification', 'industry_best_practice', 'expected_roi']:
+                    if enriched.get(field):
+                        merged[field] = enriched[field]
+            
+            # Add overall context to first recommendation
+            if i == 0:
+                if result.overall_assessment:
+                    merged["overall_assessment"] = result.overall_assessment
+                if result.key_priority:
+                    merged["key_priority"] = result.key_priority
+            
+            merged_recs.append(merged)
         
-        logger.info(f"✅ LLM enriched {len(enriched_recs)} recommendations with Pydantic")
-        return enriched_recs
+        logger.info(f"✅ LLM enriched {len(merged_recs)} recommendations (original content preserved)")
+        return merged_recs
         
     except Exception as e:
         logger.warning(f"LLM enrichment failed: {e}, using deterministic")
-        return recommendations
+        return recommendations  

@@ -56,3 +56,9 @@ class GlobalState(TypedDict):
     
     # Data (serializable - NO DataFrames)
     transactions_data: List[Dict[str, Any]]
+     # Data (serializable - NO DataFrames)
+    transactions_data: List[Dict[str, Any]]
+    
+    # ===== NEW FIELDS FOR PARSER =====
+    raw_files: List[Dict[str, Any]]  # Uploaded files: [{"filename": str, "content": str/bytes, "type": str}]
+    parsing_status: Literal["pending", "done", "failed", "no_files"]  # Status of parsing

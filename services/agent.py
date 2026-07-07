@@ -120,12 +120,13 @@ AVAILABLE TOOLS:
 DECISION LOGIC:
 - User asks about burn/expenses/runway AND metrics don't exist → [calculate_burn_metrics]
 - User asks about runway AND metrics exist AND no forecast → [calculate_burn_metrics, forecast_runway]
-- User asks about runway AND forecast already exists → [] (no tools needed, just respond)
+- User asks about runway AND forecast already exists → [generate_recommendations]
 - User mentions hiring/firing/"what if"/scenario changes → [model_scenario, calculate_burn_metrics, forecast_runway]
 - User asks for advice/recommendations → [calculate_burn_metrics, generate_recommendations]
+- User asks about financial health or "how are we doing" → [calculate_burn_metrics, generate_recommendations]
 - User asks a follow-up about previous scenario → reuse existing data, only run what's needed
 - User greets or says thanks → [] (no tools needed)
-- If unsure, default to [calculate_burn_metrics, forecast_runway] to provide comprehensive data
+- Default (any other financial question) → [calculate_burn_metrics, forecast_runway, generate_recommendations]
 
 IMPORTANT:
 - NEVER skip calculate_burn_metrics if metrics don't exist
@@ -206,6 +207,7 @@ def plan_actions(
     # Build state context
     has_metrics = state.get("computed_metrics") is not None
     has_forecast = state.get("forecast_results") is not None
+    has_runway = state.get("runway_forecast") is not None
     active_scenario = state.get("active_scenario", "none")
     rec_count = len(state.get("recommendations", []))
     
@@ -221,6 +223,7 @@ def plan_actions(
     state_context = f"""CURRENT STATE:
         - Metrics computed: {"✅ yes" if has_metrics else "❌ no (needs calculation)"}
         - Forecast available: {"✅ yes" if has_forecast else "❌ no (needs projection)"}
+        - Runway forecast available: {"✅ yes" if has_runway else "❌ no"}
         - Active scenario: {active_scenario}
         - Recommendations available: {rec_count}
 
@@ -249,11 +252,11 @@ def plan_actions(
         
     except Exception as e:
         logger.error(f"Planning failed: {e}", exc_info=True)
-        # Fallback: compute baseline metrics
+        # Fallback: compute baseline metrics with recommendations
         return {
-            "plan": ["calculate_burn_metrics", "forecast_runway"],
-            "reasoning": "Planning error, recomputing comprehensive baseline",
-            "response_hint": "Show current financial status with runway projections"
+            "plan": ["calculate_burn_metrics", "forecast_runway", "generate_recommendations"],
+            "reasoning": "Planning error, recomputing comprehensive baseline with recommendations",
+            "response_hint": "Show current financial status with runway projections and recommendations"
         }
 
 
@@ -327,9 +330,11 @@ def _update_state_from_tool(tool_name: str, result: Any, state: Dict[str, Any]) 
         logger.info(f"✈️ Forecast stored")
     
     elif tool_name == "generate_recommendations":
-        if isinstance(result, list):
+        if isinstance(result, list) and len(result) > 0:
             state["recommendations"] = result
-        logger.info(f"💡 Recommendations stored: {len(state.get('recommendations', []))} items")
+            logger.info(f"💡 Recommendations stored: {len(result)} items")
+        else:
+            logger.warning(f"⚠️ No recommendations generated or invalid format")
 
 
 # In generate_final_response, use the structured data
@@ -346,54 +351,57 @@ def generate_final_response(
     runway = state.get("runway_forecast") or {}
     recommendations = state.get("recommendations") or []
     
-    # Build metrics summary
-    metrics_summary = f"""
-        Cash Balance: ${metrics.get('cash_balance', 0):,.0f}
-        Gross Burn: ${metrics.get('gross_burn', 0):,.0f}/month
-        Net Burn: ${metrics.get('net_burn', 0):,.0f}/month
-        Monthly Revenue: ${metrics.get('monthly_revenue', 0):,.0f}/month
-        Runway: {metrics.get('cash_runway_months', 0):.1f} months"""
-            
-    # Build enriched recommendations summary
+    # Convert metrics to dict if it's a dataclass
+    if hasattr(metrics, '__dataclass_fields__'):
+        from dataclasses import asdict
+        metrics = asdict(metrics)
+    
+    # Build metrics summary - NO indentation in f-string
+    cash = metrics.get('cash_balance', 0) if isinstance(metrics, dict) else getattr(metrics, 'cash_balance', 0)
+    gross = metrics.get('gross_burn', 0) if isinstance(metrics, dict) else getattr(metrics, 'gross_burn', 0)
+    net = metrics.get('net_burn', 0) if isinstance(metrics, dict) else getattr(metrics, 'net_burn', 0)
+    revenue = metrics.get('monthly_revenue', 0) if isinstance(metrics, dict) else getattr(metrics, 'monthly_revenue', 0)
+    runway_months = metrics.get('cash_runway_months', 0) if isinstance(metrics, dict) else getattr(metrics, 'cash_runway_months', 0)
+    
+    metrics_summary = (
+        f"Cash Balance: ${cash:,.0f}\n"
+        f"Gross Burn: ${gross:,.0f}/month\n"
+        f"Net Burn: ${net:,.0f}/month\n"
+        f"Monthly Revenue: ${revenue:,.0f}/month\n"
+        f"Runway: {runway_months:.1f} months"
+    )
+    
+    # Build recommendations summary
     rec_summary = "No recommendations available."
     if recommendations:
         rec_lines = []
         for rec in recommendations[:3]:
             priority = rec.get('priority', 'MEDIUM')
             title = rec.get('title', '')
-            
-            # Include enriched insights if available
-            insight = rec.get('contextual_insight', '')
-            if insight:
-                rec_lines.append(f"- {priority}: {title} — {insight[:80]}...")
-            else:
-                rec_lines.append(f"- {priority}: {title}")
+            description = rec.get('description', '')
+            rec_lines.append(f"- {priority}: {title} — {description[:100]}")
         rec_summary = "\n".join(rec_lines)
     
-    # Build system prompt
-    system_prompt = f"""
-        You are FinCFO, a startup financial analyst.
-
-        **METRICS:**
-        {metrics_summary}
-
-        **RECOMMENDATIONS:**
-        {rec_summary}
-
-        **INSTRUCTIONS:**
-        1. Use ONLY the numbers provided above
-        2. Reference recommendations naturally
-        3. Keep response concise and actionable
-        4. Use ### for section headers with ONE emoji
-        5. Use - for bullet points
-        6. End with 💡 actionable insight
-        """
+    # Build clean system prompt
+    system_prompt = (
+        "You are FinCFO, a startup financial analyst.\n\n"
+        f"METRICS:\n{metrics_summary}\n\n"
+        f"RECOMMENDATIONS:\n{rec_summary}\n\n"
+        "INSTRUCTIONS:\n"
+        "1. Use ONLY the numbers provided above\n"
+        "2. Reference recommendations naturally in your response\n"
+        "3. Keep response concise and actionable\n"
+        "4. Use ### for section headers with ONE emoji\n"
+        "5. Use - for bullet points\n"
+        "6. End with 💡 actionable insight"
+    )
     
     if response_hint:
-        system_prompt += f"\n**Focus area:** {response_hint}"
+        system_prompt += f"\n\nFocus area: {response_hint}"
     
     try:
         from services.llm_service import call_llm_with_history
+        logger.info(f"System prompt being sent:\n{system_prompt[:300]}")
         response = call_llm_with_history(
             system_prompt=system_prompt,
             conversation_history=conversation_history,
@@ -405,27 +413,38 @@ def generate_final_response(
     except Exception as e:
         logger.error(f"Response generation failed: {e}")
         return generate_fallback_response(state)
-
+    
 def generate_fallback_response(state: Dict[str, Any]) -> str:
     """Deterministic fallback if LLM fails."""
     metrics = state.get("computed_metrics", {}) or {}
+    
+    # Convert to dict if dataclass
+    if hasattr(metrics, '__dataclass_fields__'):
+        from dataclasses import asdict
+        metrics = asdict(metrics)
+    
     runway = state.get("runway_forecast", {}) or {}
     
-    parts = ["### 📊 Financial Summary\n"]
+    parts = ["### 📊 Financial Summary", ""]
     
-    if metrics:
-        parts.append(f"- **Cash:** ${metrics.get('cash_balance', 0):,.0f}")
-        parts.append(f"- **Net Burn:** ${metrics.get('net_burn', 0):,.0f}/month")
-        parts.append(f"- **Revenue:** ${metrics.get('monthly_revenue', 0):,.0f}/month")
+    cash = metrics.get('cash_balance', 0) if isinstance(metrics, dict) else 0
+    net_burn = metrics.get('net_burn', 0) if isinstance(metrics, dict) else 0
+    revenue = metrics.get('monthly_revenue', 0) if isinstance(metrics, dict) else 0
+    runway_months = metrics.get('cash_runway_months', 0) if isinstance(metrics, dict) else 0
     
-    if runway:
-        p50 = runway.get('p50_months', runway.get('p50_days', 0)//30)
-        parts.append(f"- **Runway:** {p50} months")
+    if cash:
+        parts.append(f"- **Cash:** ${cash:,.0f}")
+    if net_burn:
+        parts.append(f"- **Net Burn:** ${net_burn:,.0f}/month")
+    if revenue:
+        parts.append(f"- **Revenue:** ${revenue:,.0f}/month")
+    if runway_months:
+        parts.append(f"- **Runway:** {runway_months:.1f} months")
     
-    parts.append(f"\n💬 Ask me about burn rate, runway, hiring scenarios, or recommendations!")
+    parts.append("")
+    parts.append("💬 Ask me about burn rate, runway, hiring scenarios, or recommendations!")
     
     return "\n".join(parts)
-
 
 def run_agent(
     user_query: str,

@@ -62,6 +62,9 @@ def init_session_state():
             "recommendations": [], "assumptions_ledger": [], "next_action": None,
             "requires_recompute": False, "current_agent": "", "error_state": None,
             "_loop_count": 0, "scenario_processed": False, "transactions_data": transactions_data,
+            "transactions_data": [],
+            "raw_files": [],  # ← NEW: Store uploaded files here
+            "parsing_status": "no_files",  # ← NEW: Track parsing status
         }
     if "langsmith_initialized" not in st.session_state:
         setup_langsmith()

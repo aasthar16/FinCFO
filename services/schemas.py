@@ -1,7 +1,31 @@
 # services/schemas.py (NEW FILE)
 
+"""
+Pydantic schemas for financial data parsing and structured output.
+"""
+
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
+from datetime import date as _date, datetime as _datetime
+
+
+class TransactionRecord(BaseModel):
+    """Single transaction record from parsed data."""
+    date: _date = Field(description="Transaction date")
+    amount: float = Field(description="Transaction amount (negative for outflow)")
+    description: str = Field(description="Transaction description")
+    category: str = Field(default="other", description="Category like salary, rent, software, marketing, revenue, etc.")
+    is_one_time: bool = Field(default=False, description="Whether this is a one-time expense")
+
+class ParsedFinancialData(BaseModel):
+    """Complete parsed financial data from one file."""
+    transactions: List[TransactionRecord] = Field(description="Parsed transaction records")
+    cash_balance: Optional[float] = Field(default=None, description="Current cash balance if found")
+    monthly_revenue: Optional[float] = Field(default=None, description="Monthly revenue if found")
+    currency: str = Field(default="USD", description="Currency of the data")
+    source_filename: str = Field(default="unknown", description="Original filename")
+    parse_timestamp: str = Field(default_factory=lambda: _datetime.now().isoformat())
+    explanation: str = Field(default="", description="Brief explanation of what was parsed")
 
 
 class EnrichedRecommendation(BaseModel):

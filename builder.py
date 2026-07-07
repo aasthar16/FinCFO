@@ -7,6 +7,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from graph.state import GlobalState
+from graph.nodes.parser import parser_node, route_after_parser
 from graph.nodes.supervisor_v2 import supervisor_v2_node, route_from_supervisor_v2
 from graph.nodes.scenario import scenario_node
 from graph.nodes.burn_expense import burn_expense_node
@@ -32,9 +33,23 @@ def build_ai_cfo_graph(checkpointer: Optional[MemorySaver] = None, use_v2: bool 
     if use_v2:
         # === V2: Agentic Architecture ===
         # Single supervisor node that handles everything via tools
+        builder.add_node("parser", parser_node)
         builder.add_node("supervisor", supervisor_v2_node)
         
-        # Simple routing: supervisor → end
+       
+        
+        builder.set_entry_point("parser")
+
+        builder.add_conditional_edges(
+            "parser",
+            route_after_parser,
+            {
+                "supervisor": "supervisor",
+                "end": END,
+            }
+        )
+        
+        # Supervisor → end
         builder.add_conditional_edges(
             "supervisor",
             route_from_supervisor_v2,
@@ -42,8 +57,6 @@ def build_ai_cfo_graph(checkpointer: Optional[MemorySaver] = None, use_v2: bool 
                 "end": END,
             }
         )
-        
-        builder.set_entry_point("supervisor")
     else:
         # === V1: Hub-and-Spoke Architecture (original) ===
         from graph.nodes.supervisor import supervisor_node
