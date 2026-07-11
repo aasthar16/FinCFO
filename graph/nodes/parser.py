@@ -14,6 +14,7 @@ from config.langsmith import traced
 logger = logging.getLogger(__name__)
 
 
+
 @traced("parser_node", tags=["parser", "financial"])
 def parser_node(state: GlobalState) -> Dict[str, Any]:
     """
@@ -28,8 +29,8 @@ def parser_node(state: GlobalState) -> Dict[str, Any]:
     if not raw_files:
         logger.info("No raw files to parse")
         return {
-            "parsing_status": "no_files",
-            "messages": [AIMessage(content="📄 No files uploaded. Please upload a CSV or Excel file to analyze.")],
+            "parsing_status": "no_files"
+            # "messages": [AIMessage(content="📄 No files uploaded. Please upload a CSV or Excel file to analyze.")],
         }
     
     # Check if already parsed
@@ -108,10 +109,10 @@ def route_after_parser(state: GlobalState) -> str:
     status = state.get("parsing_status")
     
     if status == "done":
-        return "supervisor"
+        return "agent"
     elif status == "failed":
         # User can retry or end conversation
-        return "end"
+        return "agent"
     else:
         # No files or parsing not done
-        return "end"
+        return "agent"

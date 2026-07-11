@@ -23,7 +23,7 @@ class Settings:
     app_version: str = "1.0.0"
     
     # LLM
-    groq_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "llama-3.3-70b-versatile"
     
     # LangSmith (observability - optional)
     langsmith_api_key: Optional[str] = None
@@ -58,7 +58,7 @@ def get_settings() -> Settings:
         return Settings(
             database_url=st.secrets['postgres']['url'],
             groq_api_key=st.secrets['groq']['api_key'],
-            groq_model=st.secrets.get('groq', {}).get('model', 'mixtral-8x7b-32768'),
+            groq_model=st.secrets.get('groq', {}).get('model', 'llama-3.3-70b-versatile'),
             langsmith_api_key=st.secrets.get('langsmith', {}).get('api_key'),
             langsmith_project=st.secrets.get('langsmith', {}).get('project', 'ai-cfo-platform'),
             langsmith_tracing=st.secrets.get('langsmith', {}).get('tracing', True),

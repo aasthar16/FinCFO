@@ -54,7 +54,7 @@ You are a financial data parser. Extract structured financial data from the prov
 **FILE TYPE:** {file_type or 'unknown'}
 
 **INPUT DATA:**
-{content_text[:8000]}  { '...(truncated)' if len(content_text) > 8000 else '' }
+{content_text[:2000]}  { '...(truncated)' if len(content_text) > 2000 else '' }
 
 **RULES:**
 1. Identify all transactions (date, amount, description)
@@ -62,7 +62,7 @@ You are a financial data parser. Extract structured financial data from the prov
 3. For category, use any of these or create your own: salary, rent, software, marketing, revenue, payroll, legal, office, travel, saas, other
 4. If a date is missing, try to infer from context
 5. Look for cash balance and monthly revenue if mentioned
-6. Mark is_one_time as true for irregular/large expenses
+6. Mark is_one_time as true for irregular/large expenses 
 
 **OUTPUT:** Return the extracted data matching the TransactionRecord structure.
 """

@@ -23,7 +23,7 @@ class GlobalState(TypedDict):
     Global state for the AI CFO system.
     """
     # Chat history - handles both dict and BaseMessage types
-    messages: Annotated[List[Union[Dict[str, Any], BaseMessage]], add_messages]
+    messages: Annotated[List[BaseMessage],add_messages]
     
     # Startup profile (user-configurable in UI)
     startup_profile: StartupProfile
@@ -37,7 +37,7 @@ class GlobalState(TypedDict):
     scenario_overrides: Dict[str, Any]
     active_scenario: Optional[str]
     scenario_history: List[Dict[str, Any]]
-    
+   
     # Forecasting
     forecast_results: Optional[Dict[str, Any]]
     runway_forecast: Optional[Dict[str, Any]]
@@ -49,16 +49,36 @@ class GlobalState(TypedDict):
     assumptions_ledger: List[Dict[str, Any]]
     
     # Routing
-    next_action: Literal["scenario", "burn", "forecast", "recommendation", "end"]
+    
     requires_recompute: bool
     current_agent: str
     error_state: Optional[str]
     
     # Data (serializable - NO DataFrames)
     transactions_data: List[Dict[str, Any]]
-     # Data (serializable - NO DataFrames)
-    transactions_data: List[Dict[str, Any]]
+    
     
     # ===== NEW FIELDS FOR PARSER =====
     raw_files: List[Dict[str, Any]]  # Uploaded files: [{"filename": str, "content": str/bytes, "type": str}]
     parsing_status: Literal["pending", "done", "failed", "no_files"]  # Status of parsing
+
+    # ===== NEW FIELDS FOR TOOLS =====
+    financial_snapshot: Optional[Dict[str, Any]]
+
+    forecast_results: Optional[Dict[str, Any]]
+
+    recommendations: List[Dict[str, Any]]
+
+
+# Thread-local storage for current state (used by tools)
+import threading
+
+_state_store = threading.local()
+
+def set_current_state(state: dict):
+    """Store current state for tool access."""
+    _state_store.state = state
+
+def get_current_state() -> dict:
+    """Get current state from tools."""
+    return getattr(_state_store, 'state', {})
