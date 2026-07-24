@@ -10,6 +10,10 @@ from dataclasses import dataclass, asdict
 import logging
 import warnings
 
+
+from statsforecast import StatsForecast
+from statsforecast.models import AutoTheta
+
 from prophet import Prophet
 from prophet.diagnostics import cross_validation, performance_metrics
 
@@ -19,33 +23,6 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-def convert_to_serializable(obj):
-    """Convert numpy/pandas types to Python native types."""
-    if isinstance(obj, (np.int64, np.int32, np.int16, np.int8)):
-        return int(obj)
-    elif isinstance(obj, (np.float64, np.float32, np.float16)):
-        return float(obj)
-    elif isinstance(obj, np.bool_):
-        return bool(obj)
-    elif isinstance(obj, (np.ndarray, pd.Series)):
-        return obj.tolist()
-    elif isinstance(obj, pd.Period):
-        return str(obj)
-    elif isinstance(obj, pd.Timestamp):
-        return obj.isoformat()
-    elif isinstance(obj, datetime):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {k: convert_to_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_to_serializable(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(convert_to_serializable(item) for item in obj)
-    elif hasattr(obj, '__dataclass_fields__'):
-        return convert_to_serializable(asdict(obj))
-    elif hasattr(obj, 'isoformat'):
-        return obj.isoformat()
-    return obj
 
 
 @dataclass
@@ -206,77 +183,326 @@ def _fallback_forecast(
     }
 
 
-@traced("cash_runway_forecast", tags=["runway", "forecast"])
-def forecast_cash_runway(
-    cash_balance: float,
-    net_burn: float,
-    burn_volatility: float = 0.15,
-    forecast_months: int = 24,
-    monte_carlo_runs: int = 1000,
-) -> CashRunwayForecast:
-    """
-    Forecast cash runway using Monte Carlo simulation.
-    """
-    cash_balance = float(cash_balance)
-    net_burn = float(net_burn)
-    burn_volatility = float(burn_volatility)
+# @traced("cash_runway_forecast", tags=["runway", "forecast"])
+# def forecast_cash_runway(
+#     cash_balance: float,
+#     net_burn: float,
+#     burn_volatility: float = 0.15,
+#     forecast_months: int = 24,
+#     monte_carlo_runs: int = 1000,
+# ) -> CashRunwayForecast:
+#     """
+#     Forecast cash runway using Monte Carlo simulation.
+#     """
+#     cash_balance = float(cash_balance)
+#     net_burn = float(net_burn)
+#     burn_volatility = float(burn_volatility)
     
-    if net_burn <= 0:
-        return CashRunwayForecast(
-            p10_date=datetime.now() + timedelta(days=365*10),
-            p50_date=datetime.now() + timedelta(days=365*10),
-            p90_date=datetime.now() + timedelta(days=365*10),
-            p10_days=3650,
-            p50_days=3650,
-            p90_days=3650,
-            # model_accuracy=1.0,
-            assumptions={"note": "Not burning cash"},
+#     if net_burn <= 0:
+#         return CashRunwayForecast(
+#             p10_date=datetime.now() + timedelta(days=365*10),
+#             p50_date=datetime.now() + timedelta(days=365*10),
+#             p90_date=datetime.now() + timedelta(days=365*10),
+#             p10_days=3650,
+#             p50_days=3650,
+#             p90_days=3650,
+#             # model_accuracy=1.0,
+#             assumptions={"note": "Not burning cash"},
+#         )
+    
+#     np.random.seed(42)
+#     all_runways = []
+    
+#     for _ in range(monte_carlo_runs):
+#         cash = cash_balance
+#         month = 0
+#         while cash > 0 and month < forecast_months:
+#             monthly_burn = net_burn * (1 + np.random.normal(0, burn_volatility))
+#             cash -= monthly_burn
+#             month += 1
+#         all_runways.append(month)
+    
+#     sorted_runways = sorted(all_runways)
+#     p10_idx = int(0.1 * len(sorted_runways))
+#     p50_idx = int(0.5 * len(sorted_runways))
+#     p90_idx = int(0.9 * len(sorted_runways))
+    
+#     p10_months = int(sorted_runways[p10_idx])
+#     p50_months = int(sorted_runways[p50_idx])
+#     p90_months = int(sorted_runways[p90_idx])
+    
+#     today = datetime.now()
+#     p10_date = today + timedelta(days=30 * p10_months)
+#     p50_date = today + timedelta(days=30 * p50_months)
+#     p90_date = today + timedelta(days=30 * p90_months)
+    
+#     # model_accuracy = float(max(0.5, min(0.95, 1 - (burn_volatility * 2))))
+    
+#     return CashRunwayForecast(
+#         p10_date=p10_date,
+#         p50_date=p50_date,
+#         p90_date=p90_date,
+#         p10_days=p10_months * 30,
+#         p50_days=p50_months * 30,
+#         p90_days=p90_months * 30,
+#         # model_accuracy=model_accuracy,
+#         assumptions=convert_to_serializable({
+#             "burn_volatility": burn_volatility,
+#             "monte_carlo_runs": monte_carlo_runs,
+#             "forecast_months": forecast_months,
+#         }),
+#     )
+
+
+
+
+def forecast_financials(
+    financial_snapshot: Dict[str, Any],
+    horizon: int = 12,
+) -> Dict[str, Any]:
+    """
+    Generate a financial forecast.
+
+    Parameters
+    ----------
+    financial_snapshot
+        Output of build_financial_snapshot()
+
+    horizon
+        Number of months to forecast.
+
+    Returns
+    -------
+    Dict
+        Forecast Snapshot.
+    """
+
+    history = financial_snapshot["financial_timeseries"]["monthly"]
+
+    if len(history) < 6:
+        raise ValueError(
+            "At least 6 months of history are required."
         )
-    
-    np.random.seed(42)
-    all_runways = []
-    
-    for _ in range(monte_carlo_runs):
-        cash = cash_balance
-        month = 0
-        while cash > 0 and month < forecast_months:
-            monthly_burn = net_burn * (1 + np.random.normal(0, burn_volatility))
-            cash -= monthly_burn
-            month += 1
-        all_runways.append(month)
-    
-    sorted_runways = sorted(all_runways)
-    p10_idx = int(0.1 * len(sorted_runways))
-    p50_idx = int(0.5 * len(sorted_runways))
-    p90_idx = int(0.9 * len(sorted_runways))
-    
-    p10_months = int(sorted_runways[p10_idx])
-    p50_months = int(sorted_runways[p50_idx])
-    p90_months = int(sorted_runways[p90_idx])
-    
-    today = datetime.now()
-    p10_date = today + timedelta(days=30 * p10_months)
-    p50_date = today + timedelta(days=30 * p50_months)
-    p90_date = today + timedelta(days=30 * p90_months)
-    
-    # model_accuracy = float(max(0.5, min(0.95, 1 - (burn_volatility * 2))))
-    
-    return CashRunwayForecast(
-        p10_date=p10_date,
-        p50_date=p50_date,
-        p90_date=p90_date,
-        p10_days=p10_months * 30,
-        p50_days=p50_months * 30,
-        p90_days=p90_months * 30,
-        # model_accuracy=model_accuracy,
-        assumptions=convert_to_serializable({
-            "burn_volatility": burn_volatility,
-            "monte_carlo_runs": monte_carlo_runs,
-            "forecast_months": forecast_months,
-        }),
+
+    history_df = pd.DataFrame(history)
+
+    burn_forecast = forecast_burn(
+        history_df,
+        horizon=horizon,
     )
 
+    # metrics is now a dictionary
+    metrics = financial_snapshot["metrics"]
 
+    runway = build_runway_projection(
+        burn_forecast=burn_forecast,
+        cash_balance=metrics["cash_balance"],
+    )
+
+    risk = build_risk_metrics(
+        burn_forecast,
+    )
+
+    insights = build_forecast_insights(
+        burn_forecast,
+    )
+
+    return {
+        "model": burn_forecast["model"],
+        "forecast": burn_forecast["forecast"],
+        "runway": runway,
+        "risk": risk,
+        "insights": insights,
+    }
+
+def forecast_burn(
+    history_df: pd.DataFrame,
+    horizon: int = 12,
+) -> Dict[str, Any]:
+    """
+    Forecast monthly net burn using StatsForecast AutoTheta.
+    """
+
+    df = history_df.copy()
+
+    df["month"] = pd.to_datetime(df["month"])
+
+    df = df.rename(
+        columns={
+            "month": "ds",
+            "net_burn": "y",
+        }
+    )
+
+    df["unique_id"] = "startup"
+
+    df = df[
+        [
+            "unique_id",
+            "ds",
+            "y",
+        ]
+    ]
+
+    model = StatsForecast(
+        models=[
+            AutoTheta(),
+        ],
+        freq="MS",
+        n_jobs=1,
+    )
+
+    pred = model.forecast(
+        df=df,
+        h=horizon,
+    )
+
+    forecast = []
+
+    for _, row in pred.iterrows():
+
+        forecast.append(
+            {
+                "month": row["ds"].strftime("%Y-%m-%d"),
+                "net_burn": max(
+                    0.0,
+                    float(row["AutoTheta"]),
+                ),
+            }
+        )
+
+    return {
+        "model": "AutoTheta",
+        "forecast": forecast,
+    }
+
+
+
+def build_runway_projection(
+    burn_forecast: Dict[str, Any],
+    cash_balance: float,
+) -> Dict[str, Any]:
+    """
+    Simulate future cash balance using predicted burn.
+    """
+
+    cash = float(cash_balance)
+
+    history = []
+
+    exhausted_month = None
+
+    for month in burn_forecast["forecast"]:
+
+        burn = month["net_burn"]
+
+        cash -= burn
+
+        history.append(
+            {
+                "month": month["month"],
+                "cash_balance": max(cash, 0.0),
+                "burn": burn,
+            }
+        )
+
+        if exhausted_month is None and cash <= 0:
+            exhausted_month = month["month"]
+
+    return {
+        "months": history,
+        "cash_out_date": exhausted_month,
+        "remaining_cash": max(cash, 0.0),
+    }
+
+
+
+
+
+def build_risk_metrics(
+    burn_forecast: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Simple forecast risk statistics.
+    """
+
+    burns = [
+        m["net_burn"]
+        for m in burn_forecast["forecast"]
+    ]
+
+    if not burns:
+        return {}
+
+    burns = np.asarray(burns)
+
+    mean = float(np.mean(burns))
+
+    std = float(np.std(burns))
+
+    cv = std / mean if mean else 0
+
+    if cv < 0.10:
+        level = "Low"
+    elif cv < 0.25:
+        level = "Medium"
+    else:
+        level = "High"
+
+    return {
+        "mean_burn": mean,
+        "std_burn": std,
+        "coefficient_of_variation": cv,
+        "risk_level": level,
+    }
+
+
+
+
+
+def build_forecast_insights(
+    burn_forecast: Dict[str, Any],
+) -> List[str]:
+    """
+    Generate simple deterministic insights.
+    """
+
+    forecast = burn_forecast["forecast"]
+    insights = []
+
+    if len(forecast) < 2:
+        return insights
+
+    first = forecast[0]["net_burn"]
+    last = forecast[-1]["net_burn"]
+
+    # 🚨 CHANGE 1: Be hyper-specific so the LLM doesn't confuse Net and Gross
+    if last > first * 1.15:
+        insights.append(
+            "Net Burn (cash deficit) is forecasted to increase over the planning horizon."
+        )
+    elif last < first * 0.85:
+        insights.append(
+            "Net Burn (cash deficit) is forecasted to decrease over the planning horizon."
+        )
+    else:
+        insights.append(
+            "Net Burn (cash deficit) is expected to remain relatively stable."
+        )
+
+    peak = max(f["net_burn"] for f in forecast)
+
+    # 🚨 CHANGE 2: Add explicit LLM instructions inside the insight!
+    if peak == 0:
+        insights.append(
+            "Peak projected Net Burn is $0. (CRITICAL INSTRUCTION FOR FINCFO: This means revenue exceeds expenses. The company is profitable. DO NOT say gross burn is $0)."
+        )
+    else:
+        insights.append(
+            f"Peak projected monthly Net Burn is ${peak:,.0f}."
+        )
+
+    return insights
 def generate_recommendations(
     burn_metrics: Dict[str, Any],
     forecast_results: Dict[str, Any],

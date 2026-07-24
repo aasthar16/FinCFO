@@ -6,23 +6,32 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Dict, Any, Tuple
-from dataclasses import dataclass, asdict
+from pydantic import BaseModel, ConfigDict
 
 from config.langsmith import traced, log_metric, log_assumption
 
+class BurnMetrics(BaseModel):
+    """
+    Deterministic financial metrics computed directly from
+    historical transaction data.
+    """
 
-@dataclass
-class BurnMetrics:
+    model_config = ConfigDict(extra="forbid")
+
     gross_burn: float
     net_burn: float
+
     gross_burn_3m_avg: float
     net_burn_3m_avg: float
-    one_time_expenses: float
+
     recurring_expenses: float
+    one_time_expenses: float
+
     fully_loaded_ratio: float
-    cash_runway_months: float
+
     cash_balance: float
     monthly_revenue: float
+
     burn_multiple: float
 
 
@@ -52,8 +61,8 @@ def convert_to_serializable(obj):
         return [convert_to_serializable(item) for item in obj]
     elif isinstance(obj, tuple):
         return tuple(convert_to_serializable(item) for item in obj)
-    elif hasattr(obj, '__dataclass_fields__'):
-        return convert_to_serializable(asdict(obj))
+    elif isinstance(obj, BaseModel):
+        return convert_to_serializable(obj.model_dump())
     elif hasattr(obj, 'isoformat'):
         return obj.isoformat()
     return obj
@@ -194,17 +203,20 @@ def compute_burn(
     metrics = BurnMetrics(
         gross_burn=float(abs(gross_burn)),
         net_burn=float(abs(net_burn)),
+
         gross_burn_3m_avg=float(abs(gross_burn_3m_avg)),
         net_burn_3m_avg=float(abs(net_burn_3m_avg)),
-        one_time_expenses=float(abs(one_time_expenses)),
+
         recurring_expenses=float(abs(recurring_expenses)),
+        one_time_expenses=float(abs(one_time_expenses)),
+
         fully_loaded_ratio=float(fully_loaded_ratio),
-        cash_runway_months=float(cash_runway_months),
+
         cash_balance=float(cash_balance),
         monthly_revenue=float(monthly_revenue),
+
         burn_multiple=float(burn_multiple),
     )
-    
     # Convert monthly_breakdown to serializable
     monthly_breakdown = []
     for record in monthly_agg.to_dict('records'):

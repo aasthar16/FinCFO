@@ -16,6 +16,7 @@ class StartupProfile(TypedDict):
     industry: Optional[str]
     country: Optional[str]
     founded_date: Optional[str]
+    employee_burden_ratio: Optional[float]
 
 
 class GlobalState(TypedDict):
@@ -64,21 +65,22 @@ class GlobalState(TypedDict):
 
     # ===== NEW FIELDS FOR TOOLS =====
     financial_snapshot: Optional[Dict[str, Any]]
-
+    
+    financial_timeseries: Optional[Dict[str, List[Dict[str, Any]]]]
     forecast_results: Optional[Dict[str, Any]]
 
     recommendations: List[Dict[str, Any]]
 
 
 # Thread-local storage for current state (used by tools)
-import threading
+# import threading
 
-_state_store = threading.local()
+# _state_store = threading.local()
 
-def set_current_state(state: dict):
-    """Store current state for tool access."""
-    _state_store.state = state
+# def set_current_state(state: dict):
+#     """Store current state for tool access."""
+#     _state_store.state = state
 
-def get_current_state() -> dict:
-    """Get current state from tools."""
-    return getattr(_state_store, 'state', {})
+# def get_current_state() -> dict:
+#     """Get current state from tools."""
+#     return getattr(_state_store, 'state', {})

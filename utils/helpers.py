@@ -2,10 +2,41 @@
 Helper utilities.
 """
 
+from dataclasses import asdict
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
+
+# config/financial_defaults.py
+
+DEFAULT_FULLY_LOADED_RATIO = {
+    "India": 1.25,
+    "USA": 1.40,
+    "Canada": 1.35,
+    "UK": 1.35,
+    "Germany": 1.45,
+    "Australia": 1.30,
+}
+
+DEFAULT_RATIO = 1.30
+
+
+
+
+def get_fully_loaded_ratio(startup_profile: dict) -> float:
+    # User override always wins
+    if startup_profile.get("employee_burden_ratio") is not None:
+        return startup_profile["employee_burden_ratio"]
+
+    country = startup_profile.get("country")
+
+    return DEFAULT_FULLY_LOADED_RATIO.get(
+        country,
+        DEFAULT_RATIO,
+    )
+
 
 
 def generate_mock_transactions(
@@ -94,6 +125,59 @@ def format_date(date, fmt: str = "%B %d, %Y") -> str:
         date = datetime.fromisoformat(date)
     return date.strftime(fmt)
 
+
+from dataclasses import asdict, is_dataclass
+
+def convert_to_serializable(obj):
+    if isinstance(obj, (np.int64, np.int32, np.int16, np.int8)):
+        return int(obj)
+
+    elif isinstance(obj, (np.float64, np.float32, np.float16)):
+        return float(obj)
+
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+
+    elif isinstance(obj, (np.ndarray, pd.Series)):
+        return obj.tolist()
+
+    elif isinstance(obj, pd.Period):
+        return str(obj)
+
+    elif isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+
+    # ⭐ Pydantic v2
+    elif hasattr(obj, "model_dump"):
+        return convert_to_serializable(obj.model_dump())
+
+    # ⭐ Pydantic v1
+    elif hasattr(obj, "dict"):
+        return convert_to_serializable(obj.dict())
+
+    # ⭐ Dataclass
+    elif is_dataclass(obj):
+        return convert_to_serializable(asdict(obj))
+
+    elif isinstance(obj, dict):
+        return {
+            k: convert_to_serializable(v)
+            for k, v in obj.items()
+        }
+
+    elif isinstance(obj, list):
+        return [
+            convert_to_serializable(v)
+            for v in obj
+        ]
+
+    elif isinstance(obj, tuple):
+        return tuple(
+            convert_to_serializable(v)
+            for v in obj
+        )
+
+    return obj
 
 def calculate_confidence_interval(values: List[float], confidence: float = 0.95) -> Dict[str, float]:
     """Calculate confidence interval for a list of values."""

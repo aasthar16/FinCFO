@@ -54,8 +54,8 @@ def init_session_state():
         st.session_state.state = {
             "messages": [],
             "startup_profile": st.session_state.startup_profile,
-            "cash_balance": 1200000,
-            "monthly_revenue": 85000,
+            "cash_balance": 0,
+            "monthly_revenue": 0,
             "computed_metrics": None,
             "scenario_overrides": {},
             "active_scenario": None,

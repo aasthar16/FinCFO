@@ -2,20 +2,23 @@
 Tool definitions for the AI CFO Agent.
 Lightweight tools — burn calculation moved to burn_calculator node.
 """
-
+from langgraph.types import Command
 import json
+from langchain_core.tools import InjectedToolCallId
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-
+from typing import Dict, Any, List, Optional, Annotated, Literal, Union
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
-
-from services.forecasting import forecast_cash_runway
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langgraph.prebuilt import InjectedState
+from services.forecasting import forecast_financials
 from services.schemas import ScenarioExtractionResult
 from settings import settings
-
+from services.recommendations import (
+    generate_agentic_recommendations,
+)
 logger = logging.getLogger(__name__)
 
 # Groq for scenario extraction
@@ -39,58 +42,217 @@ def _get_state() -> dict:
 # ================================================================
 
 @tool
-def model_scenario(user_query: str) -> Dict[str, Any]:
+def model_scenario(
+    user_query: str,
+    state: Annotated[dict, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId], # 🚨 INJECT THE ID HERE
+) -> Command:
     """
-    Extract hiring/firing/revenue-change parameters from user query.
-    Call FIRST when user describes a scenario change.
+    Extract scenario parameters from a user's what-if query.
     """
-    state = _get_state()
-    
     previous_context = {
         "total_headcount": state.get("scenario_overrides", {}).get("headcount_change", 0),
         "avg_salary": state.get("scenario_overrides", {}).get("avg_salary"),
         "active_scenario": state.get("active_scenario"),
     }
-    
-    context_str = ""
-    if previous_context.get("total_headcount"):
-        context_str = f"""
-Previous scenario: headcount_change={previous_context['total_headcount']}, 
-avg_salary=${previous_context.get('avg_salary', 'N/A')}
-"""
-    
-    system_prompt = f"""Extract scenario parameters from user query.
 
+    context_str = ""
+    if previous_context["total_headcount"]:
+        context_str = f"""
+Previous scenario:
+- headcount_change = {previous_context["total_headcount"]}
+- avg_salary = ${previous_context.get("avg_salary", "N/A")}
+"""
+
+    system_prompt = f"""
+Extract scenario parameters from the user query.
 RULES:
-- "hire 2 engineers at $8000/month" → action:hire, count:2, role:engineer, salary:8000
-- "fire 2 salespeople" → action:fire, count:2, role:salesperson
-- "what if revenue grows 20%" → action:revenue_change
-- "add 3 more at same salary" → action:hire, count:3, is_addition:true, salary:null
-- If no action found → action:"none"
+- "hire 2 engineers at $8000/month" -> action=hire, count=2, salary=8000
+- "what if revenue grows 20%" -> action=revenue_change
+If no scenario exists: action="none"
 {context_str}
 """
-    
+
     try:
         result = scenario_llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_query),
         ])
-        scenario_dict = result.model_dump()
-        
-        if scenario_dict.get("action") not in ["none", None]:
-            state["scenario_overrides"] = {
-                "headcount_change": scenario_dict.get("count", 0),
-                "avg_salary": (scenario_dict.get("salary") or 8000) * 12,
-                "revenue_change": scenario_dict.get("revenue_change"),
-                "one_time_expenses": scenario_dict.get("one_time_expenses"),
+
+        scenario = result.model_dump()
+        overrides = None
+
+        if scenario.get("action") not in ("none", None):
+            overrides = {
+                "headcount_change": scenario.get("count", 0),
+                "avg_salary": (scenario.get("salary") or 8000) * 12,
+                "revenue_change": scenario.get("revenue_change"),
+                "one_time_expenses": scenario.get("one_time_expenses"),
                 "ramp_months": 3,
             }
-            logger.info(f"📋 Scenario: {state['scenario_overrides']}")
+            logger.info("📋 Scenario extracted: %s", overrides)
+
         
-        return scenario_dict
+        return Command(
+            update={
+                "scenario_overrides": overrides,
+                "messages": [
+                    ToolMessage(
+                        content=f"Scenario extracted successfully: {overrides}",
+                        tool_call_id=tool_call_id
+                    )
+                ]
+            }
+        )
+
     except Exception as e:
-        logger.error(f"Scenario failed: {e}")
-        return {"action": "none", "count": 0, "explanation": str(e)}
+        logger.exception("Scenario extraction failed")
+        return Command(
+            update={"scenario_overrides": None},
+            messages=[
+                ToolMessage(
+                    content=f"Failed to extract scenario: {e}", 
+                    tool_call_id=tool_call_id
+                )
+            ]
+        )
+
+
+# def model_scenario(
+#     user_query: str,
+#     state: Annotated[dict, InjectedState],
+# ) -> Dict[str, Any]:
+#     """
+#     Extract scenario parameters from a user's what-if query.
+
+#     Examples:
+#     - Hire/fire employees
+#     - Revenue increase/decrease
+#     - One-time expenses
+#     - Salary assumptions
+
+#     Uses any existing scenario in the graph state as context, but does
+#     not modify the graph state directly. The caller is responsible for
+#     persisting the returned scenario into the graph state.
+#     """
+
+#     previous_context = {
+#         "total_headcount": state.get("scenario_overrides", {}).get(
+#             "headcount_change", 0
+#         ),
+#         "avg_salary": state.get("scenario_overrides", {}).get(
+#             "avg_salary"
+#         ),
+#         "active_scenario": state.get("active_scenario"),
+#     }
+
+#     context_str = ""
+
+#     if previous_context["total_headcount"]:
+#         context_str = f"""
+# Previous scenario:
+# - headcount_change = {previous_context["total_headcount"]}
+# - avg_salary = ${previous_context.get("avg_salary", "N/A")}
+# """
+
+#     system_prompt = f"""
+# Extract scenario parameters from the user query.
+
+# RULES:
+# - "hire 2 engineers at $8000/month"
+#     -> action=hire
+#        count=2
+#        role=engineer
+#        salary=8000
+
+# - "fire 2 salespeople"
+#     -> action=fire
+#        count=2
+#        role=salesperson
+
+# - "what if revenue grows 20%"
+#     -> action=revenue_change
+
+# - "add 3 more at same salary"
+#     -> action=hire
+#        count=3
+#        is_addition=true
+#        salary=null
+
+# If no scenario exists:
+#     action="none"
+
+# {context_str}
+# """
+
+#     try:
+#         result = scenario_llm.invoke(
+#             [
+#                 SystemMessage(content=system_prompt),
+#                 HumanMessage(content=user_query),
+#             ]
+#         )
+
+#         scenario = result.model_dump()
+
+#         overrides = None
+
+#         if scenario.get("action") not in ("none", None):
+#             overrides = {
+#                 "headcount_change": scenario.get("count", 0),
+#                 "avg_salary": (scenario.get("salary") or 8000) * 12,
+#                 "revenue_change": scenario.get("revenue_change"),
+#                 "one_time_expenses": scenario.get("one_time_expenses"),
+#                 "ramp_months": 3,
+#             }
+
+#             logger.info("📋 Scenario extracted: %s", overrides)
+
+#         return Command(
+#             update={
+#                 "scenario_overrides": overrides,
+#                 "scenario": scenario,
+#             }
+#         )
+
+#     except Exception as e:
+#         logger.exception("Scenario extraction failed")
+
+#         return {
+#             "scenario": {
+#                 "action": "none",
+#                 "count": 0,
+#                 "explanation": str(e),
+#             },
+#             "scenario_overrides": None,
+#         }
+
+
+
+@tool
+def calculate_burn_metrics(state: Annotated[dict, InjectedState]) -> Dict[str, str]:
+    """
+    Compute the startup's current financial snapshot.
+
+    This tool acts as a trigger for the LangGraph burn calculator node.
+    The actual burn computation is performed by the dedicated
+    `burn_calculator_node`, which parses the available transaction data,
+    computes burn metrics, and stores the results in the graph state.
+
+    Produces:
+        state["financial_snapshot"]
+        state["financial_timeseries"]
+
+    Required before:
+        - forecast_runway
+        - generate_recommendations
+        - scenario analysis
+
+    Returns:
+        A placeholder response indicating that the burn calculation
+        should be executed by the graph.
+    """
+    return {"status": "invoke burn node"}
 
 
 # ================================================================
@@ -98,86 +260,81 @@ RULES:
 # ================================================================
 
 @tool
-def forecast_runway(forecast_months: int = 24) -> Dict[str, Any]:
+def forecast_runway(forecast_months: int = 12, state: Annotated[dict, InjectedState] = None) -> Dict[str, Any]:
     """
-    Project cash runway using Monte Carlo simulation.
-    Call after burn metrics are calculated.
+    Forecast burn, revenue, cash projection and runway.
+
+    Requires:
+        financial_snapshot (produced by calculate_burn_metrics)
+
+    Updates:
+        state["forecast_results"]
+        state["runway_forecast"]
     """
-    state = _get_state()
-    metrics = state.get("computed_metrics") or {}
-    
-    cash_balance = float(
-        metrics.cash_balance if hasattr(metrics, 'cash_balance') 
-        else metrics.get("cash_balance", state.get("cash_balance", 1200000))
-    )
-    net_burn = float(
-        metrics.net_burn_3m_avg if hasattr(metrics, 'net_burn_3m_avg')
-        else metrics.get("net_burn_3m_avg", metrics.get("net_burn", 100000))
-    )
-    
-    logger.info(f"📈 Forecast: cash=${cash_balance:,.0f}, burn=${net_burn:,.0f}")
-    
-    result = forecast_cash_runway(
-        cash_balance=cash_balance,
-        net_burn=net_burn,
-        burn_volatility=0.15,
-        forecast_months=forecast_months,
-    )
-    
-    output = {
-        "p50_months": (result.p50_days or 0) // 30,
-        "p10_months": (result.p10_days or 0) // 30,
-        "p90_months": (result.p90_days or 0) // 30,
-        "p50_days": result.p50_days or 0,
-    }
-    
-    state["runway_forecast"] = output
-    return output
 
+    # state = _get_state()
 
+    snapshot = state.get("financial_snapshot")
+
+    # 1. AGENT-PROOF ERROR HANDLING (Returns a dict instead of crashing)
+    if snapshot is None:
+        logger.warning("Agent called forecast_runway without financial_snapshot!")
+        return {
+            "forecast_results": {"ERROR": "CRITICAL: financial_snapshot not found. You MUST call calculate_burn_metrics tool first before forecasting."},
+            "runway_forecast": None
+        }
+
+    logger.info(
+        "Running Theta forecast for %d months...",
+        forecast_months,
+    )
+
+    forecast_results = forecast_financials(
+        financial_snapshot=snapshot,
+        horizon=forecast_months,
+    )
+
+    # Update graph state
+   
+
+    logger.info("Forecast completed successfully.")
+
+    return {
+    "forecast_results": forecast_results,
+    "runway_forecast": forecast_results.get("runway"),
+}
 # ================================================================
 # TOOL 3: Generate Recommendations
 # ================================================================
 
+
+
 @tool
-def generate_recommendations() -> List[Dict[str, Any]]:
+def generate_recommendations(state: Annotated[dict, InjectedState] = None) -> List[Dict[str, Any]]:
     """
-    Generate prioritized financial recommendations.
-    Call when user asks for advice or after full analysis.
+    Generate AI-powered CFO recommendations.
+
+    Requires:
+        financial_snapshot
+        forecast_results
     """
-    state = _get_state()
-    metrics = state.get("computed_metrics") or {}
-    runway_data = state.get("runway_forecast") or {}
-    
-    from services.forecasting import CashRunwayForecast
-    
-    runway_forecast = None
-    if runway_data:
-        try:
-            runway_forecast = CashRunwayForecast(
-                p10_date=datetime.now(),
-                p50_date=datetime.now(),
-                p90_date=datetime.now(),
-                p10_days=runway_data.get("p10_days", 180),
-                p50_days=runway_data.get("p50_days", 365),
-                p90_days=runway_data.get("p90_days", 540),
-                assumptions={},
-            )
-        except:
-            pass
-    
-    from services.recommendations import generate_recommendations as generate_hybrid_recs
-    
-    recs = generate_hybrid_recs(
-        burn_metrics={"metrics": metrics},
-        forecast_results={},
-        runway_forecast=runway_forecast,
-        state=state,
-        enable_llm_enrichment=True,
+
+    # state = _get_state()
+
+    snapshot = state["financial_snapshot"]
+
+    if snapshot is None:
+        raise ValueError(
+            "Run calculate_burn_metrics before requesting recommendations."
+        )
+
+    recommendations = generate_agentic_recommendations(
+        financial_snapshot=snapshot,
+        forecast_results=state.get("forecast_results"),
+        startup_profile=state.get("startup_profile", {}),
+        scenario_overrides=state.get("scenario_overrides"),
     )
-    
-    state["recommendations"] = recs
-    logger.info(f"💡 {len(recs)} recommendations generated")
-    return recs
 
-
+    return {
+    "recommendations": recommendations
+}
