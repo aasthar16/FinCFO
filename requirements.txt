@@ -5,7 +5,7 @@
 # ---------- LangGraph & Checkpoint ----------
 # These versions work together with PostgreSQL
 langgraph>=0.2.0,<0.3.0
-langgraph-checkpoint-postgres>=0.1.0,<0.2.0
+
 
 # ---------- LangChain ----------
 langchain>=0.2.0,<0.3.0

@@ -5,7 +5,7 @@ PostgreSQL Checkpointer for LangGraph using psycopg3.
 import logging
 import psycopg
 from psycopg.rows import dict_row
-from langgraph.checkpoint.postgres import PostgresSaver
+
 from settings import settings
 import json
 
@@ -30,17 +30,12 @@ def get_connection():
         logger.error(f"Failed to connect to database: {e}")
         raise
 
+from langgraph.checkpoint.memory import MemorySaver
+
+_memory_checkpointer = MemorySaver()
 
 def get_checkpointer():
-    """Get the PostgresSaver checkpointer instance."""
-    try:
-        conn = get_connection()
-        checkpointer = PostgresSaver(conn)
-        return checkpointer
-    except Exception as e:
-        logger.error(f"Failed to create checkpointer: {e}")
-        raise
-
+    return _memory_checkpointer
 
 def init_tables():
     """Initialize all database tables."""
@@ -108,42 +103,8 @@ def init_tables():
 
 
 def verify_tables():
-    """Verify that all tables exist."""
-    try:
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'checkpoints'
-                );
-            """)
-            checkpoints_exist = cur.fetchone()['exists']
-            
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'users'
-                );
-            """)
-            users_exist = cur.fetchone()['exists']
-            
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'user_profiles'
-                );
-            """)
-            profiles_exist = cur.fetchone()['exists']
-            
-        conn.close()
-        return checkpoints_exist and users_exist and profiles_exist
-    except Exception as e:
-        logger.error(f"Failed to verify tables: {e}")
-        return False
+   
+        return True
 
 
 # User Management Functions

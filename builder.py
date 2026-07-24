@@ -4,15 +4,15 @@ LangGraph graph builder - Agentic Architecture.
 
 from typing import Optional
 from langgraph.graph import StateGraph, END
-# from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.memory import MemorySaver
+
 from graph.state import GlobalState
 from graph.nodes.parser import parser_node, route_after_parser
 from graph.nodes.supervisor_agent import supervisor_agent_node, route_after_agent, tool_node
 from graph.nodes.burn_calculator import burn_calculator_node
 # from graph.nodes.tools import tool_node
 
-def build_ai_cfo_graph(checkpointer: Optional[PostgresSaver] = None):
+def build_ai_cfo_graph(checkpointer: Optional[MemorySaver] = None):
     """
     Agentic architecture:
         parser → agent → burn/tools/end
