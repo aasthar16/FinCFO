@@ -103,8 +103,42 @@ def init_tables():
 
 
 def verify_tables():
-   
-        return True
+    """Verify that all tables exist."""
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'checkpoints'
+                );
+            """)
+            checkpoints_exist = cur.fetchone()['exists']
+            
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'users'
+                );
+            """)
+            users_exist = cur.fetchone()['exists']
+            
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'user_profiles'
+                );
+            """)
+            profiles_exist = cur.fetchone()['exists']
+            
+        conn.close()
+        return checkpoints_exist and users_exist and profiles_exist
+    except Exception as e:
+        logger.error(f"Failed to verify tables: {e}")
+        return False
 
 
 # User Management Functions
