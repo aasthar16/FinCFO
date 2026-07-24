@@ -31,3 +31,8 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 tenacity>=8.2.0
 pendulum>=3.0.0
+
+# ---------- Forecasting ----------
+statsforecast>=1.7.8
+prophet>=1.1.6
+scipy>=1.11.0
