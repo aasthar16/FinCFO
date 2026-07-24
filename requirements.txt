@@ -14,7 +14,7 @@ langchain-groq>=0.1.0,<0.2.0
 langsmith>=0.1.0,<0.2.0
 
 # ---------- Database ----------
-psycopg-binary>=3.1.0
+psycopg[binary]>=3.2.0
 # OR use psycopg (v3) if needed
 # psycopg-binary>=3.1.0
 
